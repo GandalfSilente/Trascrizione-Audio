@@ -37,13 +37,14 @@ Progettata per avviarsi istantaneamente senza browser né server web locali, con
 | Sistema Operativo | App Desktop (`app.py`) | CLI (`trascrivi.py`) | Note |
 | --- | :---: | :---: | --- |
 | **Linux** (Ubuntu 22.04/24.04+, Fedora, Debian, Arch con GNOME/Wayland o X11) | ✅ Pieno supporto | ✅ Pieno supporto | Consigliato GTK 4.12+ e Libadwaita 1.4+ |
-| **Windows / macOS** | ❌ Non supportata | ⚠️ Parziale | `app.py` usa GTK 4/Libadwaita e `.so` Linux; `trascrivi.py` può girare su CPU (o CUDA su Windows) |
+| **Windows 11** (tramite **WSL2 + WSLg** oppure **MSYS2 / Python nativo**) | ✅ Supportata | ✅ Pieno supporto | Con **WSL2 + WSLg** hai sia la finestra GUI nativa su Windows sia l'accelerazione **GPU NVIDIA CUDA** completa |
+| **macOS** (Apple Silicon M1/M2/M3/M4 e Intel tramite **Homebrew**) | ✅ Supportata | ✅ Pieno supporto | GTK 4 + Libadwaita via Homebrew; trascrizione in modalità CPU `int8` automatica |
 
 ### Requisiti hardware (GPU / CPU / RAM)
 | Hardware | Esperienza d'uso | Modello consigliato | Requisiti indicativi |
 | --- | --- | --- | --- |
 | **GPU NVIDIA con CUDA 12+** *(consigliato)* | Molto veloce (molte volte più rapido del tempo reale, `float16`) | `large-v3`, `Ensemble` o `large-v3-turbo` | Driver NVIDIA aggiornati; **≥ 6–8 GB VRAM** per `large-v3` / `Ensemble`, **≥ 4 GB VRAM** per `large-v3-turbo` |
-| **Solo CPU (senza GPU NVIDIA)** | Fallback automatico `int8` (più lento ma pienamente funzionante) | `large-v3-turbo` | CPU multi-core moderna, **≥ 8–16 GB RAM** |
+| **Solo CPU (senza GPU NVIDIA)** | Fallback automatico `int8` (più lento ma pienamente funzionante) | `large-v3-turbo` | CPU multi-core moderna (o Apple Silicon Serie M), **≥ 8–16 GB RAM** |
 | **GPU AMD / Intel / Apple Silicon** | Usa automaticamente il fallback CPU `int8` | `large-v3-turbo` | CTranslate2 utilizza CUDA su NVIDIA |
 
 > **Spazio su disco**: alla prima esecuzione i modelli Whisper vengono scaricati automaticamente da Hugging Face nella cache locale (~1,6 GB per `large-v3-turbo`, ~3 GB per `large-v3`). Le trascrizioni successive funzionano completamente offline.
@@ -57,7 +58,7 @@ Supporta tutti i principali formati decodificabili da PyAV/FFmpeg:
 
 ---
 
-## Installazione (Ubuntu / Debian)
+## Installazione su Linux (Ubuntu / Debian)
 
 ### 1. Dipendenze di sistema (GTK 4 + Libadwaita)
 Su Ubuntu 24.04 GNOME sono spesso già presenti; in caso contrario installale con:
@@ -83,6 +84,89 @@ python3 -m venv .venv
 
 ---
 
+## Installazione su Windows 11
+
+Su Windows 11 puoi usare l'applicazione in due modi (senza modificare il codice):
+
+### Metodo A — Consigliato (App Desktop GUI + GPU NVIDIA CUDA): tramite WSL2 + WSLg
+Windows 11 include nativamente **WSLg** (che mostra le finestre grafiche Linux direttamente sul desktop di Windows) e supporta il passthrough automatico dei driver **NVIDIA CUDA** installati su Windows.
+
+1. Assicurati di avere i **driver NVIDIA per Windows** aggiornati.
+2. Apri **PowerShell** e installa WSL2 con Ubuntu (se non è già presente):
+   ```powershell
+   wsl --install -d Ubuntu-24.04
+   ```
+3. Apri il terminale **Ubuntu** da Windows ed esegui esattamente i comandi della guida Linux:
+   ```bash
+   sudo apt update
+   sudo apt install git python3-venv python3-gi gir1.2-gtk-4.0 gir1.2-adw-1
+   git clone https://github.com/GandalfSilente/Trascrizione-Audio.git
+   cd Trascrizione-Audio
+   python3 -m venv .venv
+   .venv/bin/pip install --upgrade pip
+   .venv/bin/pip install -r requirements.txt
+   .venv/bin/python app.py
+   ```
+   *(La finestra dell'app apparirà direttamente sul desktop di Windows 11; i file del tuo PC Windows sono accessibili in `/mnt/c/Users/<TuoUtente>/Downloads`.)*
+
+### Metodo B — Windows 11 nativo (senza WSL)
+- **Solo CLI (`trascrivi.py`) con Python per Windows**:
+  ```powershell
+  git clone https://github.com/GandalfSilente/Trascrizione-Audio.git
+  cd Trascrizione-Audio
+  python -m venv .venv
+  .venv\Scripts\pip install --upgrade pip
+  .venv\Scripts\pip install faster-whisper
+  .venv\Scripts\python trascrivi.py "C:\percorso\del\file.mp3"
+  ```
+  *(Per usare CUDA su Windows nativo installa CUDA 12 + cuBLAS/cuDNN per Windows oppure aggiungi le DLL NVIDIA al `PATH`; altrimenti userà automaticamente la CPU in `int8`.)*
+- **App Desktop GUI (`app.py`) tramite MSYS2 (UCRT64)**:
+  1. Installa [MSYS2](https://www.msys2.org/) e apri il terminale **MSYS2 UCRT64**.
+  2. Installa Python, GTK 4, Libadwaita e PyGObject:
+     ```bash
+     pacman -S mingw-w64-ucrt-x86_64-python mingw-w64-ucrt-x86_64-python-pip \
+               mingw-w64-ucrt-x86_64-python-gobject mingw-w64-ucrt-x86_64-gtk4 \
+               mingw-w64-ucrt-x86_64-libadwaita mingw-w64-ucrt-x86_64-adwaita-icon-theme
+     ```
+  3. Clona il progetto e crea la `.venv` condividendo i pacchetti GTK di sistema:
+     ```bash
+     git clone https://github.com/GandalfSilente/Trascrizione-Audio.git
+     cd Trascrizione-Audio
+     python3 -m venv --system-site-packages .venv
+     .venv/bin/pip install faster-whisper
+     .venv/bin/python app.py
+     ```
+
+---
+
+## Installazione su macOS (Apple Silicon M1/M2/M3/M4 e Intel)
+
+Su macOS l'interfaccia GTK 4 + Libadwaita funziona nativamente tramite **Homebrew** e `faster-whisper` utilizza automaticamente la CPU in modalità `int8`.
+
+1. Installa [Homebrew](https://brew.sh/) (se non è già installato).
+2. Installa Python, GTK 4, Libadwaita e PyGObject:
+   ```bash
+   brew update
+   brew install python@3.12 pygobject3 gtk4 libadwaita adwaita-icon-theme
+   ```
+3. Clona il repository e crea la `.venv` con `--system-site-packages` (così Python vede `gi` / GTK 4 installati da Homebrew):
+   ```bash
+   git clone https://github.com/GandalfSilente/Trascrizione-Audio.git
+   cd Trascrizione-Audio
+   $(brew --prefix python@3.12)/bin/python3.12 -m venv --system-site-packages .venv
+   .venv/bin/pip install --upgrade pip
+   .venv/bin/pip install faster-whisper
+   ```
+4. Avvia l'app desktop (o lo script CLI):
+   ```bash
+   .venv/bin/python app.py
+   # oppure da terminale:
+   .venv/bin/python trascrivi.py /percorso/del/file.m4a
+   ```
+   *(Su Mac consigliamo di selezionare il modello **`large-v3-turbo`** dal menu a tendina per ottenere i tempi di trascrizione migliori su CPU Apple Silicon.)*
+
+---
+
 ## Utilizzo
 
 ### Avvio dell'app desktop
@@ -99,7 +183,7 @@ Puoi anche passare uno o più file direttamente da riga di comando:
 ```bash
 .venv/bin/python trascrivi.py percorso/del/file.mp3
 ```
-Se eseguito senza argomenti, `trascrivi.py` apre il selettore file (`zenity`, se installato) oppure chiede il percorso da terminale e salva `.txt` e `.srt` accanto al file sorgente.
+Se eseguito senza argomenti, `trascrivi.py` apre il selettore file (`zenity`, se installato) oppure chiede di trascinare il percorso nel terminale e salva `.txt` e `.srt` accanto al file sorgente.
 
 ### Integrazione nel Desktop / Menu Applicazioni Linux (opzionale)
 Crea un file `~/.local/share/applications/Trascrizione-Audio.desktop` (o sul Desktop) sostituendo `/PERCORSO/DEL/PROGETTO` con la cartella in cui hai clonato il repository:
