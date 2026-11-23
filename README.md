@@ -14,8 +14,8 @@ Progettata per avviarsi istantaneamente senza browser né server web locali, con
   - `large-v3` *(predefinito)*: massima accuratezza.
   - `Combinato (Ensemble: large-v3-turbo + large-v3)`: doppio passaggio con confronto sulla confidenza (`avg_logprob`) per migliorare i segmenti incerti mantenendo basso il picco di VRAM.
   - `large-v3-turbo`: ultra veloce, ideale per audio molto lunghi o PC meno potenti.
-- **Contesto medico opzionale**: toggle dedicato (attivo di default) che passa un `initial_prompt` ricco di terminologia medica, anatomica, clinica e radiologica; disattivabile con un clic per audio generici.
-- **Rilevamento lingua e VAD**: selezione lingua (`Automatica IT/EN`, `Italiano`, `Inglese`) e Silero VAD (`min_silence_duration_ms=500`) per saltare i silenzi e ridurre le allucinazioni.
+- **Profili di contesto personalizzabili**: menu a tendina con preset pronti (*Generale*, *Medicina e Radiologia IT*, *Fisica / Fisica Nucleare EN*, *Fisica e Ingegneria IT*, *Informatica e AI EN/IT*) più un pannello espandibile per scrivere/modificare il prompt tecnico e salvare o eliminare i propri profili personalizzati in `~/.config/trascrizione-audio/config.json` (fuori dal repository Git). Ogni profilo imposta automaticamente la lingua consigliata (sempre sovrascrivibile manualmente) e l'app ricorda le ultime scelte tra un avvio e l'altro.
+- **Rilevamento lingua e VAD calibrato per aule**: selezione lingua (`Automatica IT/EN`, `Italiano`, `Inglese`) e Silero VAD ottimizzato per microfoni d'aula/distanti (`threshold=0.35`, `min_silence_duration_ms=600`, `speech_pad_ms=400`) per evitare tagli delle parole iniziali e ridurre le allucinazioni nei silenzi.
 - **Visualizzazione live & export automatico**:
   - Streaming del testo in tempo reale raggruppato in paragrafi leggibili.
   - Toggle **Mostra timestamp** `(MM:SS)` senza ripetere la trascrizione.

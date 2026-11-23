@@ -51,17 +51,39 @@ headerbar {
     font-size: 13px;
 }
 
+.hint-label {
+    color: #8b95a8;
+    font-size: 12px;
+}
+
 .field-label {
     color: #c5cedf;
     font-size: 13px;
     font-weight: 600;
 }
 
+.prompt-scroll {
+    background-color: #111520;
+    border: 1px solid #2a3142;
+    border-radius: 8px;
+}
+
+.prompt-view {
+    background-color: #111520;
+    color: #e6eaf2;
+    font-size: 13px;
+}
+
+.prompt-view text {
+    background-color: #111520;
+    color: #e6eaf2;
+}
+
 .drop-zone {
     background-color: #181c26;
     border: 2px dashed #2e3850;
     border-radius: 14px;
-    padding: 26px 20px;
+    padding: 24px 20px;
     transition: background-color 140ms ease, border-color 140ms ease;
 }
 
@@ -179,8 +201,12 @@ button.ready-btn:hover {
 class TranscriptionWindow(Adw.ApplicationWindow):
     def __init__(self, app: Adw.Application) -> None:
         super().__init__(application=app, title=APP_TITLE)
-        self.set_default_size(900, 780)
-        self.set_size_request(680, 560)
+        self.set_default_size(920, 800)
+        self.set_size_request(680, 580)
+
+        self._config: dict[str, Any] = engine.load_config()
+        self._presets: list[engine.ContextPreset] = engine.get_all_presets(self._config)
+        self._restoring_ui = False
 
         self._last_state: dict[str, Any] = {}
         self._has_transcript = False
@@ -188,10 +214,12 @@ class TranscriptionWindow(Adw.ApplicationWindow):
         self._pulse_source_id: int | None = None
         self._timer_source_id: int | None = None
         self._copy_reset_source_id: int | None = None
+        self._save_prompt_source_id: int | None = None
 
         self._worker = engine.TranscriptionWorker(self._on_worker_update)
 
         self._build_ui()
+        self._restore_saved_settings()
         self.connect("close-request", self._on_close_request)
 
     def _build_ui(self) -> None:
@@ -226,6 +254,7 @@ class TranscriptionWindow(Adw.ApplicationWindow):
         controls_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
         controls_card.add_css_class("card-panel")
 
+        # Row 1: Model + Language
         row_top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=14)
 
         model_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
@@ -237,6 +266,7 @@ class TranscriptionWindow(Adw.ApplicationWindow):
         )
         self._model_dropdown.set_selected(0)
         self._model_dropdown.set_hexpand(True)
+        self._model_dropdown.connect("notify::selected", self._on_model_changed)
         model_box.append(model_lbl)
         model_box.append(self._model_dropdown)
 
@@ -248,6 +278,7 @@ class TranscriptionWindow(Adw.ApplicationWindow):
         )
         self._lang_dropdown.set_selected(0)
         self._lang_dropdown.set_size_request(210, -1)
+        self._lang_dropdown.connect("notify::selected", self._on_lang_changed)
         lang_box.append(lang_lbl)
         lang_box.append(self._lang_dropdown)
 
@@ -255,33 +286,101 @@ class TranscriptionWindow(Adw.ApplicationWindow):
         row_top.append(lang_box)
         controls_card.append(row_top)
 
-        row_toggles = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=16)
+        # Row 2: Context preset dropdown + Show timestamps
+        row_ctx = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=14)
 
-        med_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        self._medical_switch = Gtk.Switch()
-        self._medical_switch.set_active(True)
-        self._medical_switch.set_valign(Gtk.Align.CENTER)
-        self._medical_switch.set_tooltip_text(
-            "Usa il prompt medico specialistico (anatomia, radiologia, clinica, patologia) "
-            "per migliorare l'accuratezza dei termini tecnici."
+        ctx_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        ctx_box.set_hexpand(True)
+        ctx_lbl = Gtk.Label(label="Contesto / Profilo", xalign=0.0)
+        ctx_lbl.add_css_class("field-label")
+        self._preset_dropdown = Gtk.DropDown.new_from_strings(
+            [p.name for p in self._presets]
         )
-        med_lbl = Gtk.Label(label="Contesto medico")
-        med_lbl.add_css_class("field-label")
-        med_lbl.set_tooltip_text(engine.MEDICAL_INITIAL_PROMPT)
-        med_box.append(self._medical_switch)
-        med_box.append(med_lbl)
-
-        spacer = Gtk.Box()
-        spacer.set_hexpand(True)
+        self._preset_dropdown.set_hexpand(True)
+        self._preset_dropdown.connect("notify::selected", self._on_preset_changed)
+        ctx_box.append(ctx_lbl)
+        ctx_box.append(self._preset_dropdown)
 
         self._show_ts_check = Gtk.CheckButton(label="Mostra timestamp")
         self._show_ts_check.set_active(False)
-        self._show_ts_check.connect("toggled", lambda _btn: self._render_transcript())
+        self._show_ts_check.set_valign(Gtk.Align.END)
+        self._show_ts_check.set_margin_bottom(6)
+        self._show_ts_check.connect("toggled", self._on_show_ts_toggled)
 
-        row_toggles.append(med_box)
-        row_toggles.append(spacer)
-        row_toggles.append(self._show_ts_check)
-        controls_card.append(row_toggles)
+        row_ctx.append(ctx_box)
+        row_ctx.append(self._show_ts_check)
+        controls_card.append(row_ctx)
+
+        # Row 3: Collapsible prompt editor & custom profile manager
+        self._prompt_expander = Gtk.Expander(label="Personalizza prompt di contesto")
+        self._prompt_expander.set_expanded(False)
+
+        prompt_panel = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        prompt_panel.set_margin_top(8)
+
+        prompt_hint = Gtk.Label(
+            label="Inserisci argomento, sigle e termini tecnici (nella stessa lingua dell'audio) per guidare il riconoscimento.",
+            xalign=0.0,
+        )
+        prompt_hint.add_css_class("hint-label")
+        prompt_hint.set_wrap(True)
+        prompt_panel.append(prompt_hint)
+
+        prompt_scroll = Gtk.ScrolledWindow()
+        prompt_scroll.add_css_class("prompt-scroll")
+        prompt_scroll.set_min_content_height(84)
+        prompt_scroll.set_max_content_height(130)
+        prompt_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+
+        self._prompt_view = Gtk.TextView()
+        self._prompt_view.add_css_class("prompt-view")
+        self._prompt_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        self._prompt_view.set_top_margin(8)
+        self._prompt_view.set_bottom_margin(8)
+        self._prompt_view.set_left_margin(10)
+        self._prompt_view.set_right_margin(10)
+        self._prompt_buffer = self._prompt_view.get_buffer()
+        self._prompt_buffer.connect("changed", self._on_prompt_text_changed)
+
+        prompt_scroll.set_child(self._prompt_view)
+        prompt_panel.append(prompt_scroll)
+
+        preset_actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+
+        self._preset_name_entry = Gtk.Entry()
+        self._preset_name_entry.set_placeholder_text(
+            "Nome profilo (es. Cardiologia IT, Meccanica Quantistica EN)..."
+        )
+        self._preset_name_entry.set_hexpand(True)
+        self._preset_name_entry.connect("activate", self._on_save_preset_clicked)
+
+        self._save_preset_btn = Gtk.Button(label="Salva profilo")
+        self._save_preset_btn.add_css_class("accent-btn")
+        self._save_preset_btn.connect("clicked", self._on_save_preset_clicked)
+
+        self._reset_prompt_btn = Gtk.Button(label="Ripristina")
+        self._reset_prompt_btn.add_css_class("secondary-btn")
+        self._reset_prompt_btn.set_tooltip_text(
+            "Ripristina il testo salvato del profilo selezionato"
+        )
+        self._reset_prompt_btn.connect("clicked", self._on_reset_prompt_clicked)
+
+        self._delete_preset_btn = Gtk.Button(label="Elimina")
+        self._delete_preset_btn.add_css_class("destructive-action")
+        self._delete_preset_btn.set_sensitive(False)
+        self._delete_preset_btn.set_tooltip_text(
+            "Elimina il profilo personalizzato selezionato"
+        )
+        self._delete_preset_btn.connect("clicked", self._on_delete_preset_clicked)
+
+        preset_actions.append(self._preset_name_entry)
+        preset_actions.append(self._save_preset_btn)
+        preset_actions.append(self._reset_prompt_btn)
+        preset_actions.append(self._delete_preset_btn)
+        prompt_panel.append(preset_actions)
+
+        self._prompt_expander.set_child(prompt_panel)
+        controls_card.append(self._prompt_expander)
 
         content.append(controls_card)
 
@@ -426,6 +525,175 @@ class TranscriptionWindow(Adw.ApplicationWindow):
         root_box.append(self._toast_overlay)
         self.set_content(root_box)
 
+    # --- Settings & Context Preset management ---
+
+    def _restore_saved_settings(self) -> None:
+        self._restoring_ui = True
+        try:
+            self._set_model_by_key(self._config.get("model", "large-v3"))
+            self._set_preset_by_id(self._config.get("preset_id", "none"))
+            self._set_language_by_key(self._config.get("language", "auto"))
+
+            preset = self._selected_preset()
+            saved_prompt = self._config.get("custom_prompt")
+            prompt_to_show = (
+                saved_prompt if isinstance(saved_prompt, str) and saved_prompt else preset.prompt
+            )
+            if preset.id == "none" and not saved_prompt:
+                prompt_to_show = ""
+            self._prompt_buffer.set_text(prompt_to_show)
+            self._delete_preset_btn.set_sensitive(not preset.builtin)
+            self._preset_name_entry.set_text("" if preset.builtin else preset.name)
+            self._show_ts_check.set_active(bool(self._config.get("show_timestamps", False)))
+        finally:
+            self._restoring_ui = False
+
+    def _rebuild_preset_dropdown(self, select_id: str) -> None:
+        self._presets = engine.get_all_presets(self._config)
+        self._restoring_ui = True
+        try:
+            model = Gtk.StringList.new([p.name for p in self._presets])
+            self._preset_dropdown.set_model(model)
+            self._set_preset_by_id(select_id)
+            preset = self._selected_preset()
+            self._delete_preset_btn.set_sensitive(not preset.builtin)
+            self._preset_name_entry.set_text("" if preset.builtin else preset.name)
+        finally:
+            self._restoring_ui = False
+
+    def _set_model_by_key(self, key: str) -> None:
+        for idx, (k, _) in enumerate(engine.MODEL_OPTIONS):
+            if k == key:
+                self._model_dropdown.set_selected(idx)
+                return
+        self._model_dropdown.set_selected(0)
+
+    def _set_language_by_key(self, key: str) -> None:
+        for idx, (k, _) in enumerate(engine.LANGUAGE_OPTIONS):
+            if k == key:
+                self._lang_dropdown.set_selected(idx)
+                return
+        self._lang_dropdown.set_selected(0)
+
+    def _set_preset_by_id(self, preset_id: str) -> None:
+        for idx, preset in enumerate(self._presets):
+            if preset.id == preset_id:
+                self._preset_dropdown.set_selected(idx)
+                return
+        self._preset_dropdown.set_selected(0)
+
+    def _selected_preset(self) -> engine.ContextPreset:
+        idx = self._preset_dropdown.get_selected()
+        if 0 <= idx < len(self._presets):
+            return self._presets[idx]
+        return self._presets[0]
+
+    def _current_prompt_text(self) -> str:
+        start = self._prompt_buffer.get_start_iter()
+        end = self._prompt_buffer.get_end_iter()
+        return self._prompt_buffer.get_text(start, end, False).strip()
+
+    def _persist_current_config(self) -> None:
+        self._config["model"] = self._selected_model()
+        self._config["language"] = self._selected_language()
+        self._config["preset_id"] = self._selected_preset().id
+        self._config["custom_prompt"] = self._current_prompt_text()
+        self._config["show_timestamps"] = self._show_ts_check.get_active()
+        try:
+            engine.save_config(self._config)
+        except OSError:
+            pass
+
+    def _on_model_changed(self, _dropdown: Gtk.DropDown, _pspec: Any) -> None:
+        if not self._restoring_ui:
+            self._persist_current_config()
+
+    def _on_lang_changed(self, _dropdown: Gtk.DropDown, _pspec: Any) -> None:
+        if not self._restoring_ui:
+            self._persist_current_config()
+
+    def _on_show_ts_toggled(self, _btn: Gtk.CheckButton) -> None:
+        self._render_transcript()
+        if not self._restoring_ui:
+            self._persist_current_config()
+
+    def _on_preset_changed(self, _dropdown: Gtk.DropDown, _pspec: Any) -> None:
+        if self._restoring_ui:
+            return
+        preset = self._selected_preset()
+        self._restoring_ui = True
+        try:
+            self._prompt_buffer.set_text(preset.prompt)
+            self._set_language_by_key(preset.language)
+            self._delete_preset_btn.set_sensitive(not preset.builtin)
+            self._preset_name_entry.set_text("" if preset.builtin else preset.name)
+        finally:
+            self._restoring_ui = False
+        self._persist_current_config()
+
+    def _on_prompt_text_changed(self, _buf: Gtk.TextBuffer) -> None:
+        if self._restoring_ui:
+            return
+        if self._save_prompt_source_id is not None:
+            GLib.source_remove(self._save_prompt_source_id)
+        self._save_prompt_source_id = GLib.timeout_add(
+            400, self._flush_prompt_save
+        )
+
+    def _flush_prompt_save(self) -> bool:
+        self._save_prompt_source_id = None
+        self._persist_current_config()
+        return GLib.SOURCE_REMOVE
+
+    def _on_save_preset_clicked(self, _widget: Gtk.Widget) -> None:
+        name = self._preset_name_entry.get_text().strip()
+        if not name:
+            self._show_toast("Inserisci un nome per salvare il profilo.")
+            self._preset_name_entry.grab_focus()
+            return
+        prompt = self._current_prompt_text()
+        language = self._selected_language()
+        try:
+            updated_cfg, preset_id = engine.upsert_user_preset(
+                self._config, name=name, language=language, prompt=prompt
+            )
+        except ValueError as exc:
+            self._show_toast(str(exc))
+            return
+        self._config = updated_cfg
+        self._rebuild_preset_dropdown(preset_id)
+        self._persist_current_config()
+        self._show_toast(f"Profilo salvato: {name}")
+
+    def _on_reset_prompt_clicked(self, _btn: Gtk.Button) -> None:
+        preset = self._selected_preset()
+        self._restoring_ui = True
+        try:
+            self._prompt_buffer.set_text(preset.prompt)
+            self._set_language_by_key(preset.language)
+        finally:
+            self._restoring_ui = False
+        self._persist_current_config()
+        self._show_toast(f"Ripristinato il testo del profilo \"{preset.name}\"")
+
+    def _on_delete_preset_clicked(self, _btn: Gtk.Button) -> None:
+        preset = self._selected_preset()
+        if preset.builtin:
+            return
+        deleted_name = preset.name
+        self._config = engine.delete_user_preset(self._config, preset.id)
+        self._rebuild_preset_dropdown("none")
+        self._restoring_ui = True
+        try:
+            self._prompt_buffer.set_text("")
+            self._set_language_by_key("auto")
+        finally:
+            self._restoring_ui = False
+        self._persist_current_config()
+        self._show_toast(f"Profilo eliminato: {deleted_name}")
+
+    # --- Backend & Drag/Drop ---
+
     def set_backend_status(self, text: str, ready: bool = False) -> None:
         self._backend_label.set_text(text)
         if ready:
@@ -542,14 +810,14 @@ class TranscriptionWindow(Adw.ApplicationWindow):
         was_busy = self._worker.is_busy()
         model_mode = self._selected_model()
         language = self._selected_language()
-        use_medical = self._medical_switch.get_active()
+        initial_prompt = self._current_prompt_text()
 
         jobs = [
             engine.TranscriptionJob(
                 file_path=p,
                 language=language,
                 model_mode=model_mode,
-                use_medical_context=use_medical,
+                initial_prompt=initial_prompt,
             )
             for p in valid_files
         ]
@@ -570,6 +838,8 @@ class TranscriptionWindow(Adw.ApplicationWindow):
             )
         if skipped > 0:
             self._show_toast(f"Ignorati {skipped} elementi non validi (es. cartelle).")
+
+    # --- Worker UI Updates ---
 
     def _on_worker_update(self, snap: dict[str, Any]) -> None:
         GLib.idle_add(self._apply_state, snap)
@@ -772,7 +1042,6 @@ class TranscriptionWindow(Adw.ApplicationWindow):
         try:
             launcher.launch_finish(result)
         except GLib.Error as err:
-            # Fallback to Gio.AppInfo if portal launcher is unavailable
             gfile = launcher.get_file()
             if gfile is not None:
                 try:
@@ -802,6 +1071,11 @@ class TranscriptionWindow(Adw.ApplicationWindow):
         self._toast_overlay.add_toast(toast)
 
     def _on_close_request(self, _window: Gtk.Window) -> bool:
+        if self._save_prompt_source_id is not None:
+            GLib.source_remove(self._save_prompt_source_id)
+            self._save_prompt_source_id = None
+            self._persist_current_config()
+
         if self._closing_confirmed or not self._worker.is_busy():
             self._stop_pulse()
             self._stop_elapsed_timer()

@@ -6,6 +6,9 @@ from __future__ import annotations
 import ctypes
 import gc
 import glob
+import json
+import os
+import re
 import threading
 import time
 from collections import deque
@@ -17,6 +20,12 @@ BASE_DIR = Path(__file__).resolve().parent
 OUTPUT_DIR = BASE_DIR / "Trascrizioni"
 OUTPUT_DIR.mkdir(exist_ok=True)
 
+CONFIG_DIR = (
+    Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config")))
+    / "trascrizione-audio"
+)
+CONFIG_PATH = CONFIG_DIR / "config.json"
+
 MEDICAL_INITIAL_PROMPT = (
     "Lezione universitaria di medicina, chirurgia e radiologia diagnostica. "
     "Terminologia medica, anatomia, fisiopatologia, patologia, clinica, semeiotica, "
@@ -24,6 +33,43 @@ MEDICAL_INITIAL_PROMPT = (
     "radiografia, PET, scintigrafia, mezzo di contrasto, parenchima, lesione, "
     "neoplasia, metastasi, ischemia, stenosi, ipertensione, diagnosi differenziale."
 )
+
+PHYSICS_EN_PROMPT = (
+    "University lecture in physics, nuclear physics, and quantum mechanics. "
+    "Technical terminology: Hamiltonian, quadrupole, octupole, dipole, multipole, "
+    "phonon, Weisskopf units, matrix element, creation and annihilation operators, "
+    "harmonic oscillator, angular momentum, spin-orbit coupling, Coriolis, prolate, "
+    "oblate, deformed nucleus, rotational bands, magic numbers, Grodzins relation, "
+    "MeV, keV, eV, fm, Aage Bohr, Ben Mottelson, Rainwater."
+)
+
+PHYSICS_IT_PROMPT = (
+    "Lezione universitaria di fisica, meccanica quantistica, fisica nucleare e ingegneria. "
+    "Terminologia tecnica: Hamiltoniana, quadrupolo, ottupolo, dipolo, multipolo, fonone, "
+    "unità di Weisskopf, elemento di matrice, operatori di creazione e distruzione, "
+    "oscillatore armonico, momento angolare, accoppiamento spin-orbita, Coriolis, "
+    "nucleo deformato, bande rotazionali, numeri magici, elettronvolt, MeV, keV."
+)
+
+CS_EN_PROMPT = (
+    "University lecture in computer science, software engineering, and machine learning. "
+    "Technical terminology: algorithm, complexity, neural network, transformer, GPU, "
+    "CUDA, latency, API, thread, concurrency, database, compiler, Linux, Python, kernel."
+)
+
+CS_IT_PROMPT = (
+    "Lezione universitaria di informatica, ingegneria del software e intelligenza artificiale. "
+    "Terminologia tecnica: algoritmo, complessità, rete neurale, transformer, GPU, "
+    "CUDA, latenza, API, thread, concorrenza, database, compilatore, Linux, Python, kernel."
+)
+
+# Tuned Silero VAD defaults: more sensitive to distant classroom microphones
+# while padding speech boundaries so opening words are not clipped.
+VAD_PARAMETERS: dict[str, Any] = {
+    "threshold": 0.35,
+    "min_silence_duration_ms": 600,
+    "speech_pad_ms": 400,
+}
 
 MODEL_OPTIONS: list[tuple[str, str]] = [
     ("large-v3", "large-v3 (Massima precisione - Predefinito)"),
@@ -56,6 +102,224 @@ SUPPORTED_EXTENSIONS: frozenset[str] = frozenset(
         ".mpg",
     }
 )
+
+
+@dataclass(frozen=True)
+class ContextPreset:
+    id: str
+    name: str
+    language: str
+    prompt: str
+    builtin: bool = True
+
+
+BUILTIN_PRESETS: tuple[ContextPreset, ...] = (
+    ContextPreset(
+        id="none",
+        name="Generale (Nessun contesto)",
+        language="auto",
+        prompt="",
+        builtin=True,
+    ),
+    ContextPreset(
+        id="medical_it",
+        name="Medicina e Radiologia (IT)",
+        language="it",
+        prompt=MEDICAL_INITIAL_PROMPT,
+        builtin=True,
+    ),
+    ContextPreset(
+        id="physics_en",
+        name="Fisica / Fisica Nucleare (EN)",
+        language="en",
+        prompt=PHYSICS_EN_PROMPT,
+        builtin=True,
+    ),
+    ContextPreset(
+        id="physics_it",
+        name="Fisica e Ingegneria (IT)",
+        language="it",
+        prompt=PHYSICS_IT_PROMPT,
+        builtin=True,
+    ),
+    ContextPreset(
+        id="cs_en",
+        name="Informatica e AI (EN)",
+        language="en",
+        prompt=CS_EN_PROMPT,
+        builtin=True,
+    ),
+    ContextPreset(
+        id="cs_it",
+        name="Informatica e AI (IT)",
+        language="it",
+        prompt=CS_IT_PROMPT,
+        builtin=True,
+    ),
+)
+
+_DEFAULT_CONFIG: dict[str, Any] = {
+    "model": "large-v3",
+    "language": "auto",
+    "preset_id": "none",
+    "custom_prompt": "",
+    "show_timestamps": False,
+    "user_presets": [],
+}
+
+
+def load_config(config_path: Path | None = None) -> dict[str, Any]:
+    """Load persisted UI settings and custom user presets from XDG config."""
+    path = config_path or CONFIG_PATH
+    cfg = dict(_DEFAULT_CONFIG)
+    cfg["user_presets"] = []
+    if not path.is_file():
+        return cfg
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict):
+            return cfg
+    except Exception:
+        return cfg
+
+    valid_models = {k for k, _ in MODEL_OPTIONS}
+    valid_langs = {k for k, _ in LANGUAGE_OPTIONS}
+
+    if raw.get("model") in valid_models:
+        cfg["model"] = raw["model"]
+    if raw.get("language") in valid_langs:
+        cfg["language"] = raw["language"]
+    if isinstance(raw.get("preset_id"), str) and raw["preset_id"].strip():
+        cfg["preset_id"] = raw["preset_id"].strip()
+    if isinstance(raw.get("custom_prompt"), str):
+        cfg["custom_prompt"] = raw["custom_prompt"]
+    if isinstance(raw.get("show_timestamps"), bool):
+        cfg["show_timestamps"] = raw["show_timestamps"]
+
+    raw_presets = raw.get("user_presets")
+    if isinstance(raw_presets, list):
+        cleaned: list[dict[str, str]] = []
+        seen_ids: set[str] = {p.id for p in BUILTIN_PRESETS}
+        for item in raw_presets:
+            if not isinstance(item, dict):
+                continue
+            pid = str(item.get("id", "")).strip()
+            name = str(item.get("name", "")).strip()
+            lang = str(item.get("language", "auto")).strip()
+            prompt = str(item.get("prompt", ""))
+            if not pid or not name or pid in seen_ids:
+                continue
+            if lang not in valid_langs:
+                lang = "auto"
+            seen_ids.add(pid)
+            cleaned.append(
+                {
+                    "id": pid,
+                    "name": name,
+                    "language": lang,
+                    "prompt": prompt,
+                }
+            )
+        cfg["user_presets"] = cleaned
+
+    all_ids = {p.id for p in get_all_presets(cfg)}
+    if cfg["preset_id"] not in all_ids:
+        cfg["preset_id"] = "none"
+    return cfg
+
+
+def save_config(cfg: dict[str, Any], config_path: Path | None = None) -> None:
+    """Persist settings and custom presets atomically to XDG config."""
+    path = config_path or CONFIG_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(".tmp")
+    tmp_path.write_text(
+        json.dumps(cfg, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+    tmp_path.replace(path)
+
+
+def get_all_presets(cfg: dict[str, Any]) -> list[ContextPreset]:
+    presets = list(BUILTIN_PRESETS)
+    for item in cfg.get("user_presets", []):
+        if isinstance(item, dict) and item.get("id") and item.get("name"):
+            presets.append(
+                ContextPreset(
+                    id=str(item["id"]),
+                    name=str(item["name"]),
+                    language=str(item.get("language", "auto")),
+                    prompt=str(item.get("prompt", "")),
+                    builtin=False,
+                )
+            )
+    return presets
+
+
+def _slugify_preset_id(name: str, existing_ids: set[str]) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_") or "custom"
+    base = f"user_{slug}"
+    candidate = base
+    suffix = 2
+    while candidate in existing_ids:
+        candidate = f"{base}_{suffix}"
+        suffix += 1
+    return candidate
+
+
+def upsert_user_preset(
+    cfg: dict[str, Any], name: str, language: str, prompt: str
+) -> tuple[dict[str, Any], str]:
+    """Create or update a user preset by name, returning (updated_cfg, preset_id)."""
+    clean_name = name.strip()
+    if not clean_name:
+        raise ValueError("Inserisci un nome per il profilo.")
+
+    valid_langs = {k for k, _ in LANGUAGE_OPTIONS}
+    clean_lang = language if language in valid_langs else "auto"
+    user_presets = [dict(p) for p in cfg.get("user_presets", [])]
+
+    for item in user_presets:
+        if item["name"].lower() == clean_name.lower():
+            item["name"] = clean_name
+            item["language"] = clean_lang
+            item["prompt"] = prompt.strip()
+            updated = dict(cfg)
+            updated["user_presets"] = user_presets
+            updated["preset_id"] = item["id"]
+            updated["language"] = clean_lang
+            updated["custom_prompt"] = prompt.strip()
+            return updated, item["id"]
+
+    existing_ids = {p.id for p in BUILTIN_PRESETS} | {p["id"] for p in user_presets}
+    new_id = _slugify_preset_id(clean_name, existing_ids)
+    user_presets.append(
+        {
+            "id": new_id,
+            "name": clean_name,
+            "language": clean_lang,
+            "prompt": prompt.strip(),
+        }
+    )
+    updated = dict(cfg)
+    updated["user_presets"] = user_presets
+    updated["preset_id"] = new_id
+    updated["language"] = clean_lang
+    updated["custom_prompt"] = prompt.strip()
+    return updated, new_id
+
+
+def delete_user_preset(cfg: dict[str, Any], preset_id: str) -> dict[str, Any]:
+    """Delete a user-created preset by id (built-in presets cannot be deleted)."""
+    user_presets = [
+        dict(p) for p in cfg.get("user_presets", []) if p.get("id") != preset_id
+    ]
+    updated = dict(cfg)
+    updated["user_presets"] = user_presets
+    if updated.get("preset_id") == preset_id:
+        updated["preset_id"] = "none"
+        updated["custom_prompt"] = ""
+    return updated
+
 
 # Lazy backend state — never loaded synchronously on module import.
 _backend_lock = threading.Lock()
@@ -211,7 +475,7 @@ class TranscriptionJob:
     file_path: Path
     language: str = "auto"
     model_mode: str = "large-v3"
-    use_medical_context: bool = True
+    initial_prompt: str = ""
 
 
 class TranscriptionWorker:
@@ -340,7 +604,10 @@ class TranscriptionWorker:
             emit_cancelled = False
             with self._lock:
                 self._worker_thread = None
-                if self._cancel_event.is_set() and self._state.get("status") != "cancelled":
+                if (
+                    self._cancel_event.is_set()
+                    and self._state.get("status") != "cancelled"
+                ):
                     emit_cancelled = True
             if emit_cancelled:
                 self._update_state(
@@ -392,10 +659,11 @@ class TranscriptionWorker:
             kwargs: dict[str, Any] = {
                 "beam_size": 5,
                 "vad_filter": True,
-                "vad_parameters": {"min_silence_duration_ms": 500},
+                "vad_parameters": dict(VAD_PARAMETERS),
             }
-            if job.use_medical_context:
-                kwargs["initial_prompt"] = MEDICAL_INITIAL_PROMPT
+            clean_prompt = job.initial_prompt.strip()
+            if clean_prompt:
+                kwargs["initial_prompt"] = clean_prompt
             if job.language and job.language != "auto":
                 kwargs["language"] = job.language
 
