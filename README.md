@@ -185,8 +185,12 @@ Puoi anche passare uno o più file direttamente da riga di comando:
 ```
 Se eseguito senza argomenti, `trascrivi.py` apre il selettore file (`zenity`, se installato) oppure chiede di trascinare il percorso nel terminale e salva `.txt` e `.srt` accanto al file sorgente.
 
-### Integrazione nel Desktop / Menu Applicazioni Linux (opzionale)
-Crea un file `~/.local/share/applications/Trascrizione-Audio.desktop` (o sul Desktop) sostituendo `/PERCORSO/DEL/PROGETTO` con la cartella in cui hai clonato il repository:
+---
+
+## Creare l'icona sul Desktop (avvio con doppio clic senza terminale)
+
+### Linux (Ubuntu / GNOME / KDE)
+Crea un file `~/Desktop/Trascrizione-Audio.desktop` (e/o in `~/.local/share/applications/Trascrizione-Audio.desktop` per averla anche nel menu applicazioni) sostituendo `/PERCORSO/DEL/PROGETTO` con la cartella in cui hai clonato il repository:
 
 ```ini
 [Desktop Entry]
@@ -200,10 +204,43 @@ Categories=AudioVideo;Utility;
 StartupWMClass=org.trascrizioneaudio.App
 ```
 
-Rendi eseguibile il launcher:
+Rendi eseguibile il file e (su Ubuntu/GNOME) abilita l'avvio da Desktop:
 ```bash
-chmod +x ~/.local/share/applications/Trascrizione-Audio.desktop
+chmod +x ~/Desktop/Trascrizione-Audio.desktop
+gio set ~/Desktop/Trascrizione-Audio.desktop metadata::trusted true
 ```
+*(In alternativa su Ubuntu fai tasto destro sull'icona sul Desktop → **Consenti avvio** / **Allow Launching**.)*
+
+### Windows 11
+- **Se usi il Metodo A (WSL2 + WSLg — con GPU NVIDIA CUDA)**:
+  1. Fai **tasto destro sul Desktop** di Windows 11 → **Nuovo → Collegamento**.
+  2. Nel campo *Immettere il percorso per il collegamento* incolla (sostituendo `~/Trascrizione-Audio` se hai clonato il progetto in un altro percorso dentro WSL):
+     ```text
+     wslg.exe -d Ubuntu-24.04 --cd "~/Trascrizione-Audio" -- ./.venv/bin/python app.py
+     ```
+     *(Usando `wslg.exe` invece di `wsl.exe` l'app si apre direttamente come finestra grafica su Windows 11 **senza aprire alcuna finestra del terminale**).*
+  3. Clicca **Avanti**, assegna il nome **Trascrizione Audio** e clicca **Fine**.
+  4. *(Opzionale)* Tasto destro sul collegamento → **Proprietà → Cambia icona...** per scegliere un'icona personalizzata (es. da `%SystemRoot%\System32\shell32.dll` o `imageres.dll`).
+- **Se usi il Metodo B (MSYS2 UCRT64 nativo)**:
+  1. Fai **tasto destro sul Desktop** → **Nuovo → Collegamento**.
+  2. Come percorso inserisci (adattando `C:\percorso\Trascrizione-Audio`):
+     ```text
+     C:\msys64\ucrt64.exe C:\percorso\Trascrizione-Audio\.venv\bin\pythonw.exe C:\percorso\Trascrizione-Audio\app.py
+     ```
+     *(L'eseguibile `pythonw.exe` avvia la finestra grafica senza mostrare il prompt dei comandi).*
+
+### macOS (Icona `.app` nativa sul Desktop e nel Dock)
+Su macOS puoi generare un'applicazione nativa **`Trascrizione Audio.app`** direttamente sul Desktop (senza aprire il Terminale all'avvio) con un singolo comando usando `osacompile` (incluso di serie in macOS).
+
+Apri il Terminale ed esegui (adattando `~/Trascrizione-Audio` se hai clonato il repository altrove):
+
+```bash
+osacompile -o ~/Desktop/"Trascrizione Audio.app" \
+  -e 'do shell script "export PATH=/opt/homebrew/bin:/usr/local/bin:$PATH; cd ~/Trascrizione-Audio && ./.venv/bin/python app.py >/dev/null 2>&1 &"'
+```
+
+- Sul **Desktop** comparirà subito l'app **Trascrizione Audio**: basta un **doppio clic** per aprire direttamente la finestra dell'applicazione senza alcuna finestra del Terminale.
+- Puoi anche trascinare `Trascrizione Audio.app` nella cartella **Applicazioni** (`/Applications`) o direttamente nella barra **Dock** di macOS.
 
 ---
 
