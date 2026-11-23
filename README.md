@@ -2,7 +2,7 @@
 
 Applicazione desktop nativa per Linux (con script CLI incluso) per trascrivere file audio e video lunghi **100% in locale e offline**, sfruttando `faster-whisper` con accelerazione **GPU NVIDIA CUDA** (e fallback automatico su CPU) e filtro vocale **VAD**.
 
-Progettata per avviarsi istantaneamente senza browser né server web locali, con supporto a Drag & Drop nativo Wayland, coda multi-file e un prompt specialistico opzionale per terminologia medica e universitaria.
+Progettata per avviarsi istantaneamente senza browser né server web locali, con supporto a Drag & Drop nativo Wayland, coda multi-file e profili di contesto personalizzabili per adattare il riconoscimento a qualsiasi disciplina (medicina, fisica, informatica, ecc.).
 
 ---
 
@@ -125,8 +125,8 @@ chmod +x ~/.local/share/applications/Trascrizione-Audio.desktop
 
 ## Struttura del progetto
 
-- `app.py` — Interfaccia desktop nativa GTK 4 + Libadwaita (Drag & Drop, coda, controlli, visualizzazione live, scorciatoie `Ctrl+W`/`Ctrl+Q`).
-- `engine.py` — Motore di trascrizione disaccoppiato dalla GUI (lazy loading CUDA/`faster-whisper`, gestione coda FIFO, modalità Ensemble, annullamento e rilascio VRAM).
+- `app.py` — Interfaccia desktop nativa GTK 4 + Libadwaita (Drag & Drop, coda, profili di contesto personalizzabili, visualizzazione live, scorciatoie `Ctrl+W`/`Ctrl+Q`).
+- `engine.py` — Motore di trascrizione disaccoppiato dalla GUI (lazy loading CUDA/`faster-whisper`, gestione coda FIFO, preset/persistenza XDG, VAD d'aula, modalità Ensemble, annullamento e rilascio VRAM).
 - `trascrivi.py` — Utility CLI indipendente con `large-v3-turbo`.
 - `requirements.txt` — Dipendenze Python per la `.venv`.
 - `Trascrizioni/` — Cartella generata automaticamente per i file `.txt` e `.srt` prodotti (ignorata da Git).
@@ -137,4 +137,5 @@ chmod +x ~/.local/share/applications/Trascrizione-Audio.desktop
 
 - Nessun dato audio, video o testuale viene mai inviato a server esterni.
 - I file sorgente vengono letti direttamente dal disco senza creare copie temporanee e **non vengono mai modificati né eliminati**.
+- I profili personalizzati e le preferenze dell'interfaccia sono salvati localmente in `~/.config/trascrizione-audio/config.json`, separati dal repository.
 - La cartella `Trascrizioni/` è esclusa dal tracciamento Git tramite `.gitignore`.
