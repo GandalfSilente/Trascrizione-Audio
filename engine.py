@@ -658,12 +658,16 @@ class TranscriptionWorker:
 
             kwargs: dict[str, Any] = {
                 "beam_size": 5,
+                "condition_on_previous_text": False,
                 "vad_filter": True,
                 "vad_parameters": dict(VAD_PARAMETERS),
             }
             clean_prompt = job.initial_prompt.strip()
             if clean_prompt:
-                kwargs["initial_prompt"] = clean_prompt
+                # With condition_on_previous_text=False, faster-whisper's `hotwords`
+                # injects the context prompt into every 30s window (unlike initial_prompt
+                # which is only kept on window 1) without autoregressive punctuation drift.
+                kwargs["hotwords"] = clean_prompt
             if job.language and job.language != "auto":
                 kwargs["language"] = job.language
 
