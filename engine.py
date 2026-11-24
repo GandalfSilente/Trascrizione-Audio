@@ -83,6 +83,12 @@ LANGUAGE_OPTIONS: list[tuple[str, str]] = [
     ("en", "Inglese"),
 ]
 
+DIARIZATION_OPTIONS: list[tuple[str, str]] = [
+    ("off", "NO (Disattivato)"),
+    ("on", "SI (Più voci)"),
+    ("auto", "Auto (Rileva se più voci)"),
+]
+
 SUPPORTED_EXTENSIONS: frozenset[str] = frozenset(
     {
         ".mp3",
@@ -161,6 +167,7 @@ BUILTIN_PRESETS: tuple[ContextPreset, ...] = (
 _DEFAULT_CONFIG: dict[str, Any] = {
     "model": "large-v3",
     "language": "auto",
+    "diarization": "off",
     "preset_id": "none",
     "custom_prompt": "",
     "show_timestamps": False,
@@ -184,11 +191,14 @@ def load_config(config_path: Path | None = None) -> dict[str, Any]:
 
     valid_models = {k for k, _ in MODEL_OPTIONS}
     valid_langs = {k for k, _ in LANGUAGE_OPTIONS}
+    valid_diar = {k for k, _ in DIARIZATION_OPTIONS}
 
     if raw.get("model") in valid_models:
         cfg["model"] = raw["model"]
     if raw.get("language") in valid_langs:
         cfg["language"] = raw["language"]
+    if raw.get("diarization") in valid_diar:
+        cfg["diarization"] = raw["diarization"]
     if isinstance(raw.get("preset_id"), str) and raw["preset_id"].strip():
         cfg["preset_id"] = raw["preset_id"].strip()
     if isinstance(raw.get("custom_prompt"), str):
@@ -404,19 +414,108 @@ def ensure_backend_loaded() -> Any:
     return _whisper_model_cls
 
 
-def format_srt(seconds: float) -> str:
-    ms = int(round(seconds * 1000))
-    h, ms = divmod(ms, 3_600_000)
-    m, ms = divmod(ms, 60_000)
-    s, ms = divmod(ms, 1000)
-    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
-
-
 def format_short(seconds: float) -> str:
     total = max(0, int(seconds))
     h, rem = divmod(total, 3600)
     m, s = divmod(rem, 60)
     return f"{h:02d}:{m:02d}:{s:02d}" if h > 0 else f"{m:02d}:{s:02d}"
+
+
+def build_speaker_blocks(raw_segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Group consecutive segments by speaker (and readable paragraph breaks)."""
+    blocks: list[dict[str, Any]] = []
+    cur_speaker = ""
+    cur_texts: list[str] = []
+    cur_start: float | None = None
+    last_end: float | None = None
+
+    for seg in raw_segments:
+        text = str(seg.get("text", "")).strip()
+        if not text:
+            continue
+        speaker = str(seg.get("speaker", "") or "")
+        start = float(seg["start"])
+        end = float(seg["end"])
+
+        if cur_start is None:
+            cur_speaker = speaker
+            cur_start = start
+
+        gap = (start - last_end) if last_end is not None else 0.0
+        joined_len = sum(len(t) for t in cur_texts) + len(cur_texts)
+        prev_ends_sentence = bool(cur_texts and cur_texts[-1][-1:] in ".!?")
+        speaker_changed = speaker != cur_speaker
+        para_break = (
+            not speaker and (gap >= 1.5 or (joined_len >= 420 and prev_ends_sentence))
+        ) or (bool(speaker) and gap >= 3.0 and joined_len >= 420 and prev_ends_sentence)
+
+        if cur_texts and (speaker_changed or para_break):
+            blocks.append(
+                {
+                    "speaker": cur_speaker,
+                    "start": cur_start,
+                    "text": " ".join(cur_texts),
+                }
+            )
+            cur_speaker = speaker
+            cur_texts = [text]
+            cur_start = start
+        else:
+            cur_texts.append(text)
+        last_end = end
+
+    if cur_texts and cur_start is not None:
+        blocks.append(
+            {
+                "speaker": cur_speaker,
+                "start": cur_start,
+                "text": " ".join(cur_texts),
+            }
+        )
+    return blocks
+
+
+def format_blocks(
+    blocks: list[dict[str, Any]],
+    speaker_names: dict[str, str] | None = None,
+    show_timestamps: bool = False,
+) -> list[str]:
+    """Render transcript paragraphs with optional speaker headers and timestamps."""
+    names = speaker_names or {}
+    rendered: list[str] = []
+    prev_speaker: str | None = None
+
+    for blk in blocks:
+        spk_id = blk.get("speaker", "")
+        text = blk.get("text", "")
+        ts = format_short(float(blk.get("start", 0.0)))
+
+        if spk_id:
+            display_name = names.get(spk_id, spk_id).strip() or spk_id
+            if spk_id != prev_speaker:
+                header = (
+                    f"[{display_name}] ({ts})" if show_timestamps else f"[{display_name}]"
+                )
+                rendered.append(f"{header}\n{text}")
+            else:
+                rendered.append(f"({ts}) {text}" if show_timestamps else text)
+            prev_speaker = spk_id
+        else:
+            rendered.append(f"({ts}) {text}" if show_timestamps else text)
+            prev_speaker = None
+    return rendered
+
+
+def save_blocks_to_txt(
+    txt_path: Path,
+    blocks: list[dict[str, Any]],
+    speaker_names: dict[str, str] | None = None,
+) -> str:
+    """Write formatted transcript blocks to a .txt file and return the written text."""
+    lines = format_blocks(blocks, speaker_names=speaker_names, show_timestamps=False)
+    content = ("\n\n".join(lines) + "\n") if lines else ""
+    txt_path.write_text(content, encoding="utf-8")
+    return content
 
 
 def load_whisper(model_name: str) -> tuple[Any, str]:
@@ -476,6 +575,7 @@ class TranscriptionJob:
     language: str = "auto"
     model_mode: str = "large-v3"
     initial_prompt: str = ""
+    diarization_mode: str = "off"
 
 
 class TranscriptionWorker:
@@ -498,19 +598,17 @@ class TranscriptionWorker:
             "job_started_at": 0.0,
             "lines": [],
             "ts_lines": [],
+            "speaker_blocks": [],
+            "speakers": [],
+            "speaker_names": {},
             "txt_path": "",
-            "srt_path": "",
             "queue_size": 0,
             "error": "",
         }
 
     def get_snapshot(self) -> dict[str, Any]:
         with self._lock:
-            snap = dict(self._state)
-            snap["lines"] = list(self._state["lines"])
-            snap["ts_lines"] = list(self._state["ts_lines"])
-            snap["queue_size"] = len(self._queue)
-            return snap
+            return self._snapshot_locked()
 
     def is_busy(self) -> bool:
         with self._lock:
@@ -562,6 +660,9 @@ class TranscriptionWorker:
         snap = dict(self._state)
         snap["lines"] = list(self._state["lines"])
         snap["ts_lines"] = list(self._state["ts_lines"])
+        snap["speaker_blocks"] = [dict(b) for b in self._state["speaker_blocks"]]
+        snap["speakers"] = list(self._state["speakers"])
+        snap["speaker_names"] = dict(self._state["speaker_names"])
         snap["queue_size"] = len(self._queue)
         return snap
 
@@ -647,8 +748,10 @@ class TranscriptionWorker:
                 job_started_at=t0,
                 lines=[],
                 ts_lines=[],
+                speaker_blocks=[],
+                speakers=[],
+                speaker_names={},
                 txt_path="",
-                srt_path="",
                 error="",
                 message=f"Preparazione modello per {orig_name}...",
             )
@@ -767,14 +870,21 @@ class TranscriptionWorker:
                 duration=float(info.duration or 0.0),
             )
 
+            diar_mode = (
+                job.diarization_mode
+                if job.diarization_mode in ("off", "on", "auto")
+                else "off"
+            )
+            max_transcribe_pct = 92.0 if diar_mode != "off" else 99.0
+
+            raw_segments: list[dict[str, Any]] = []
             txt_paragraphs: list[str] = []
             ts_paragraphs: list[str] = []
             current_texts: list[str] = []
             current_start: float | None = None
             last_end: float | None = None
-            srt_blocks: list[str] = []
 
-            for idx, seg in enumerate(segments, start=1):
+            for seg in segments:
                 self._check_cancelled()
                 text = (
                     pick_best_text(seg, turbo_segs)
@@ -783,6 +893,14 @@ class TranscriptionWorker:
                 )
                 if not text:
                     continue
+
+                raw_segments.append(
+                    {
+                        "start": float(seg.start),
+                        "end": float(seg.end),
+                        "text": text,
+                    }
+                )
 
                 if current_start is None:
                     current_start = seg.start
@@ -805,14 +923,14 @@ class TranscriptionWorker:
                     current_texts.append(text)
 
                 last_end = seg.end
-                srt_blocks.append(
-                    f"{idx}\n{format_srt(seg.start)} --> {format_srt(seg.end)}\n{text}\n"
-                )
 
                 if info.duration > 0:
                     raw_pct = seg.end / info.duration
-                    pct = (38.0 + raw_pct * 61.0) if is_ensemble else (raw_pct * 99.0)
-                    pct = min(99.0, pct)
+                    if is_ensemble:
+                        pct = 38.0 + raw_pct * (max_transcribe_pct - 38.0)
+                    else:
+                        pct = raw_pct * max_transcribe_pct
+                    pct = min(max_transcribe_pct, pct)
                 else:
                     pct = 0.0
 
@@ -833,18 +951,33 @@ class TranscriptionWorker:
 
             self._check_cancelled()
 
-            if current_texts and current_start is not None:
-                para = " ".join(current_texts)
-                txt_paragraphs.append(para)
-                ts_paragraphs.append(f"({format_short(current_start)}) {para}")
+            ordered_speakers: list[str] = []
+            if diar_mode != "off" and raw_segments:
+                self._update_state(
+                    progress=94.0,
+                    message=f"Riconoscimento voci in corso per {orig_name}...",
+                    elapsed=round(time.time() - t0, 1),
+                )
+                import diarizer
+
+                raw_segments, ordered_speakers = diarizer.assign_speakers(
+                    job.file_path, raw_segments, mode=diar_mode
+                )
+                self._check_cancelled()
+
+            speaker_blocks = build_speaker_blocks(raw_segments)
+            speaker_names = {spk: spk for spk in ordered_speakers}
+            txt_paragraphs = format_blocks(
+                speaker_blocks, speaker_names=speaker_names, show_timestamps=False
+            )
+            ts_paragraphs = format_blocks(
+                speaker_blocks, speaker_names=speaker_names, show_timestamps=True
+            )
 
             OUTPUT_DIR.mkdir(exist_ok=True)
             stem = job.file_path.stem
             out_txt = OUTPUT_DIR / f"{stem}.txt"
-            out_srt = OUTPUT_DIR / f"{stem}.srt"
-            txt_content = ("\n\n".join(txt_paragraphs) + "\n") if txt_paragraphs else ""
-            out_txt.write_text(txt_content, encoding="utf-8")
-            out_srt.write_text("\n".join(srt_blocks), encoding="utf-8")
+            save_blocks_to_txt(out_txt, speaker_blocks, speaker_names=speaker_names)
 
             with self._lock:
                 has_more = len(self._queue) > 0 and not self._cancel_event.is_set()
@@ -867,8 +1000,10 @@ class TranscriptionWorker:
                 message=done_msg,
                 lines=txt_paragraphs,
                 ts_lines=ts_paragraphs,
+                speaker_blocks=speaker_blocks,
+                speakers=ordered_speakers,
+                speaker_names=speaker_names,
                 txt_path=str(out_txt),
-                srt_path=str(out_srt),
             )
             return cached_model, cached_model_name, cached_device
 

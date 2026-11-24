@@ -277,13 +277,26 @@ class TranscriptionWindow(Adw.ApplicationWindow):
             [label for _, label in engine.LANGUAGE_OPTIONS]
         )
         self._lang_dropdown.set_selected(0)
-        self._lang_dropdown.set_size_request(210, -1)
+        self._lang_dropdown.set_size_request(185, -1)
         self._lang_dropdown.connect("notify::selected", self._on_lang_changed)
         lang_box.append(lang_lbl)
         lang_box.append(self._lang_dropdown)
 
+        diar_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        diar_lbl = Gtk.Label(label="Riconoscimento voci", xalign=0.0)
+        diar_lbl.add_css_class("field-label")
+        self._diar_dropdown = Gtk.DropDown.new_from_strings(
+            [label for _, label in engine.DIARIZATION_OPTIONS]
+        )
+        self._diar_dropdown.set_selected(0)
+        self._diar_dropdown.set_size_request(210, -1)
+        self._diar_dropdown.connect("notify::selected", self._on_diar_changed)
+        diar_box.append(diar_lbl)
+        diar_box.append(self._diar_dropdown)
+
         row_top.append(model_box)
         row_top.append(lang_box)
+        row_top.append(diar_box)
         controls_card.append(row_top)
 
         # Row 2: Context preset dropdown + Show timestamps
@@ -495,10 +508,11 @@ class TranscriptionWindow(Adw.ApplicationWindow):
         self._open_txt_btn.set_sensitive(False)
         self._open_txt_btn.connect("clicked", self._on_open_txt_clicked)
 
-        self._open_srt_btn = Gtk.Button(label="Apri .srt")
-        self._open_srt_btn.add_css_class("secondary-btn")
-        self._open_srt_btn.set_sensitive(False)
-        self._open_srt_btn.connect("clicked", self._on_open_srt_clicked)
+        self._rename_voices_btn = Gtk.Button(label="Rinomina voci")
+        self._rename_voices_btn.add_css_class("secondary-btn")
+        self._rename_voices_btn.set_visible(False)
+        self._rename_voices_btn.set_sensitive(False)
+        self._rename_voices_btn.connect("clicked", self._on_rename_voices_clicked)
 
         self._open_dir_btn = Gtk.Button(label="Apri cartella Trascrizioni")
         self._open_dir_btn.add_css_class("secondary-btn")
@@ -514,7 +528,7 @@ class TranscriptionWindow(Adw.ApplicationWindow):
 
         actions_row.append(self._copy_btn)
         actions_row.append(self._open_txt_btn)
-        actions_row.append(self._open_srt_btn)
+        actions_row.append(self._rename_voices_btn)
         actions_row.append(self._open_dir_btn)
         actions_row.append(actions_spacer)
         actions_row.append(self._cancel_btn)
@@ -533,6 +547,7 @@ class TranscriptionWindow(Adw.ApplicationWindow):
             self._set_model_by_key(self._config.get("model", "large-v3"))
             self._set_preset_by_id(self._config.get("preset_id", "none"))
             self._set_language_by_key(self._config.get("language", "auto"))
+            self._set_diarization_by_key(self._config.get("diarization", "off"))
 
             preset = self._selected_preset()
             saved_prompt = self._config.get("custom_prompt")
@@ -575,6 +590,13 @@ class TranscriptionWindow(Adw.ApplicationWindow):
                 return
         self._lang_dropdown.set_selected(0)
 
+    def _set_diarization_by_key(self, key: str) -> None:
+        for idx, (k, _) in enumerate(engine.DIARIZATION_OPTIONS):
+            if k == key:
+                self._diar_dropdown.set_selected(idx)
+                return
+        self._diar_dropdown.set_selected(0)
+
     def _set_preset_by_id(self, preset_id: str) -> None:
         for idx, preset in enumerate(self._presets):
             if preset.id == preset_id:
@@ -596,6 +618,7 @@ class TranscriptionWindow(Adw.ApplicationWindow):
     def _persist_current_config(self) -> None:
         self._config["model"] = self._selected_model()
         self._config["language"] = self._selected_language()
+        self._config["diarization"] = self._selected_diarization()
         self._config["preset_id"] = self._selected_preset().id
         self._config["custom_prompt"] = self._current_prompt_text()
         self._config["show_timestamps"] = self._show_ts_check.get_active()
@@ -609,6 +632,10 @@ class TranscriptionWindow(Adw.ApplicationWindow):
             self._persist_current_config()
 
     def _on_lang_changed(self, _dropdown: Gtk.DropDown, _pspec: Any) -> None:
+        if not self._restoring_ui:
+            self._persist_current_config()
+
+    def _on_diar_changed(self, _dropdown: Gtk.DropDown, _pspec: Any) -> None:
         if not self._restoring_ui:
             self._persist_current_config()
 
@@ -800,6 +827,12 @@ class TranscriptionWindow(Adw.ApplicationWindow):
             return engine.LANGUAGE_OPTIONS[idx][0]
         return "auto"
 
+    def _selected_diarization(self) -> str:
+        idx = self._diar_dropdown.get_selected()
+        if 0 <= idx < len(engine.DIARIZATION_OPTIONS):
+            return engine.DIARIZATION_OPTIONS[idx][0]
+        return "off"
+
     def enqueue_paths(self, paths: list[Path]) -> None:
         valid_files = [p for p in paths if p.is_file()]
         skipped = len(paths) - len(valid_files)
@@ -810,6 +843,7 @@ class TranscriptionWindow(Adw.ApplicationWindow):
         was_busy = self._worker.is_busy()
         model_mode = self._selected_model()
         language = self._selected_language()
+        diarization_mode = self._selected_diarization()
         initial_prompt = self._current_prompt_text()
 
         jobs = [
@@ -818,6 +852,7 @@ class TranscriptionWindow(Adw.ApplicationWindow):
                 language=language,
                 model_mode=model_mode,
                 initial_prompt=initial_prompt,
+                diarization_mode=diarization_mode,
             )
             for p in valid_files
         ]
@@ -900,9 +935,12 @@ class TranscriptionWindow(Adw.ApplicationWindow):
         # Action buttons state
         self._copy_btn.set_sensitive(self._has_transcript)
         txt_ready = bool(snap.get("txt_path")) and Path(snap["txt_path"]).is_file()
-        srt_ready = bool(snap.get("srt_path")) and Path(snap["srt_path"]).is_file()
         self._set_file_button_ready(self._open_txt_btn, txt_ready)
-        self._set_file_button_ready(self._open_srt_btn, srt_ready)
+
+        speakers = snap.get("speakers") or []
+        can_rename = status == "done" and len(speakers) > 0 and txt_ready
+        self._rename_voices_btn.set_visible(can_rename)
+        self._set_file_button_ready(self._rename_voices_btn, can_rename)
 
         if status == "done" and queue_size == 0:
             txt_name = Path(snap["txt_path"]).name if snap.get("txt_path") else ""
@@ -1054,8 +1092,86 @@ class TranscriptionWindow(Adw.ApplicationWindow):
     def _on_open_txt_clicked(self, _button: Gtk.Button) -> None:
         self._launch_path(self._last_state.get("txt_path", ""))
 
-    def _on_open_srt_clicked(self, _button: Gtk.Button) -> None:
-        self._launch_path(self._last_state.get("srt_path", ""))
+    def _on_rename_voices_clicked(self, _button: Gtk.Button) -> None:
+        speakers = self._last_state.get("speakers") or []
+        if not speakers:
+            return
+        speaker_names = dict(self._last_state.get("speaker_names") or {})
+
+        dialog = Adw.AlertDialog(
+            heading="Rinomina voci",
+            body="Assegna un nome a ciascuna voce rilevata. La trascrizione e il file .txt verranno aggiornati subito.",
+        )
+        dialog.add_response("cancel", "Annulla")
+        dialog.add_response("apply", "Applica")
+        dialog.set_response_appearance("apply", Adw.ResponseAppearance.SUGGESTED)
+        dialog.set_default_response("apply")
+        dialog.set_close_response("cancel")
+
+        form_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        form_box.set_margin_top(6)
+
+        entries: dict[str, Gtk.Entry] = {}
+        for spk_id in speakers:
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+            lbl = Gtk.Label(label=f"[{spk_id}]", xalign=0.0)
+            lbl.set_size_request(90, -1)
+            lbl.add_css_class("field-label")
+
+            entry = Gtk.Entry()
+            entry.set_hexpand(True)
+            entry.set_text(speaker_names.get(spk_id, spk_id))
+            entry.set_placeholder_text(spk_id)
+            entry.connect(
+                "activate",
+                lambda _e, d=dialog: d.response("apply") or d.close(),
+            )
+            entries[spk_id] = entry
+
+            row.append(lbl)
+            row.append(entry)
+            form_box.append(row)
+
+        dialog.set_extra_child(form_box)
+        dialog.connect("response", self._on_rename_dialog_response, entries)
+        dialog.present(self)
+
+    def _on_rename_dialog_response(
+        self,
+        _dialog: Adw.AlertDialog,
+        response: str,
+        entries: dict[str, Gtk.Entry],
+    ) -> None:
+        if response != "apply":
+            return
+        new_names = {
+            spk_id: (entry.get_text().strip() or spk_id)
+            for spk_id, entry in entries.items()
+        }
+        self._apply_speaker_renames(new_names)
+
+    def _apply_speaker_renames(self, new_names: dict[str, str]) -> None:
+        blocks = self._last_state.get("speaker_blocks") or []
+        txt_path_str = self._last_state.get("txt_path", "")
+        if not blocks:
+            return
+
+        self._last_state["speaker_names"] = dict(new_names)
+        self._last_state["lines"] = engine.format_blocks(
+            blocks, speaker_names=new_names, show_timestamps=False
+        )
+        self._last_state["ts_lines"] = engine.format_blocks(
+            blocks, speaker_names=new_names, show_timestamps=True
+        )
+        self._render_transcript(auto_scroll=False)
+
+        if txt_path_str:
+            txt_path = Path(txt_path_str)
+            try:
+                engine.save_blocks_to_txt(txt_path, blocks, speaker_names=new_names)
+                self._show_toast(f"Voci rinominate e salvate in {txt_path.name}")
+            except OSError as err:
+                self._show_toast(f"Errore salvataggio .txt: {err}")
 
     def _on_open_dir_clicked(self, _button: Gtk.Button) -> None:
         engine.OUTPUT_DIR.mkdir(exist_ok=True)

@@ -16,11 +16,12 @@ Progettata per avviarsi istantaneamente senza browser né server web locali, con
   - `large-v3-turbo`: ultra veloce, ideale per audio molto lunghi o PC meno potenti.
 - **Profili di contesto personalizzabili**: menu a tendina con preset pronti (*Generale*, *Medicina e Radiologia IT*, *Fisica / Fisica Nucleare EN*, *Fisica e Ingegneria IT*, *Informatica e AI EN/IT*) più un pannello espandibile per scrivere/modificare il prompt tecnico e salvare o eliminare i propri profili personalizzati in `~/.config/trascrizione-audio/config.json` (fuori dal repository Git). Ogni profilo imposta automaticamente la lingua consigliata (sempre sovrascrivibile manualmente) e l'app ricorda le ultime scelte tra un avvio e l'altro.
 - **Rilevamento lingua e VAD calibrato per aule**: selezione lingua (`Automatica IT/EN`, `Italiano`, `Inglese`) e Silero VAD ottimizzato per microfoni d'aula/distanti (`threshold=0.35`, `min_silence_duration_ms=600`, `speech_pad_ms=400`) per evitare tagli delle parole iniziali e ridurre le allucinazioni nei silenzi.
+- **Riconoscimento voci (Speaker Diarization ONNX)**: menu a tendina **Riconoscimento voci** (`NO` predefinito, `SI` per più voci sicure, `Auto` per rilevare automaticamente se parla più di una persona). Assegna `[Voce 1]`, `[Voce 2]`, ... in ordine di apparizione usando un modello ONNX leggero (~26 MB, zero PyTorch, zero token) e, a fine trascrizione, consente di cliccare **Rinomina voci** per sostituire i nomi sia sullo schermo sia nel file `.txt` salvato.
 - **Visualizzazione live & export automatico**:
   - Streaming del testo in tempo reale raggruppato in paragrafi leggibili.
   - Toggle **Mostra timestamp** `(MM:SS)` senza ripetere la trascrizione.
-  - Salvataggio automatico di `<nome_file>.txt` e `<nome_file>.srt` nella cartella `Trascrizioni/`.
-  - Pulsanti rapidi *Copia testo*, *Apri .txt*, *Apri .srt*, *Apri cartella Trascrizioni* e *Annulla*.
+  - Salvataggio automatico di `<nome_file>.txt` nella cartella `Trascrizioni/`.
+  - Pulsanti rapidi *Copia testo*, *Apri .txt*, *Rinomina voci*, *Apri cartella Trascrizioni* e *Annulla*.
 - **Gestione pulita della GPU**: rilascio automatico della VRAM al termine della coda o in caso di annullamento/chiusura.
 - **Istanza singola e scorciatoie**: riaprire l'app porta in primo piano la finestra esistente; chiusura rapida con `Ctrl+W` o `Ctrl+Q` (con conferma se una trascrizione è in corso).
 - **Script CLI alternativo (`trascrivi.py`)**: per trascrivere rapidamente da terminale o tramite selettore `zenity`.
@@ -248,9 +249,10 @@ osacompile -o ~/Desktop/"Trascrizione Audio.app" \
 
 - `app.py` — Interfaccia desktop nativa GTK 4 + Libadwaita (Drag & Drop, coda, profili di contesto personalizzabili, visualizzazione live, scorciatoie `Ctrl+W`/`Ctrl+Q`).
 - `engine.py` — Motore di trascrizione disaccoppiato dalla GUI (lazy loading CUDA/`faster-whisper`, gestione coda FIFO, preset/persistenza XDG, VAD d'aula, modalità Ensemble, annullamento e rilascio VRAM).
+- `diarizer.py` — Motore di riconoscimento voci ONNX leggero (`WeSpeaker ResNet34` via `onnxruntime` + clustering NumPy, senza PyTorch).
 - `trascrivi.py` — Utility CLI indipendente con `large-v3-turbo`.
 - `requirements.txt` — Dipendenze Python per la `.venv`.
-- `Trascrizioni/` — Cartella generata automaticamente per i file `.txt` e `.srt` prodotti (ignorata da Git).
+- `Trascrizioni/` — Cartella generata automaticamente per i file `.txt` prodotti (ignorata da Git).
 
 ---
 
