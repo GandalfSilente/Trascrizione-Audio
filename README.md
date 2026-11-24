@@ -10,15 +10,16 @@ Progettata per avviarsi istantaneamente senza browser né server web locali, con
 
 - **Interfaccia desktop nativa Linux (`GTK 4 + Libadwaita`)**: tema scuro leggero, avvio istantaneo tramite *lazy loading* delle librerie CUDA e di `faster-whisper` in background (0 VRAM occupata all'avvio).
 - **Drag & Drop multi-file e coda sequenziale**: trascina uno o più file audio/video (o usa il pulsante *Sfoglia file...*); eventuali file aggiunti durante una trascrizione vengono messi in coda automaticamente.
-- **3 modalità di trascrizione**:
+- **4 modelli di trascrizione**:
   - `large-v3` *(predefinito)*: massima accuratezza.
   - `Combinato (Ensemble: large-v3-turbo + large-v3)`: doppio passaggio con confronto sulla confidenza (`avg_logprob`) per migliorare i segmenti incerti mantenendo basso il picco di VRAM.
   - `large-v3-turbo`: ultra veloce, ideale per audio molto lunghi o PC meno potenti.
+  - `Parakeet TDT 0.6B v3`: modello NVIDIA via ONNX, vedi sotto.
 - **Profili di contesto personalizzabili**: menu a tendina con preset pronti (*Generale*, *Medicina e Radiologia IT*, *Fisica / Fisica Nucleare EN*, *Fisica e Ingegneria IT*, *Informatica e AI EN/IT*) più un pannello espandibile per scrivere/modificare il prompt tecnico e salvare o eliminare i propri profili personalizzati in `~/.config/trascrizione-audio/config.json` (fuori dal repository Git). Ogni profilo imposta automaticamente la lingua consigliata (sempre sovrascrivibile manualmente) e l'app ricorda le ultime scelte tra un avvio e l'altro.
 - **Rilevamento lingua e VAD calibrato per aule**: selezione lingua (`Automatica IT/EN`, `Italiano`, `Inglese`) e Silero VAD ottimizzato per microfoni d'aula/distanti (`threshold=0.35`, `min_silence_duration_ms=600`, `speech_pad_ms=400`) per evitare tagli delle parole iniziali e ridurre le allucinazioni nei silenzi.
 - **Riconoscimento voci (Speaker Diarization ONNX)**: menu a tendina **Riconoscimento voci** (`NO` predefinito, `SI` per più voci sicure, `Auto` per rilevare automaticamente se parla più di una persona). Assegna `[Voce 1]`, `[Voce 2]`, ... in ordine di apparizione usando un modello ONNX leggero (~26 MB, zero PyTorch, zero token) e, a fine trascrizione, consente di cliccare **Rinomina voci** per sostituire i nomi sia sullo schermo sia nel file `.txt` salvato.
-- **Parakeet TDT 0.6B v3**: modello selezionabile dal menu (ONNX via `onnx-asr`, ~25 lingue europee, alta precisione, ~2,5 GB al primo uso). Non usa il contesto/prompt personalizzato.
-- **LIVE (Microfono)**: pulsante per trascrizione in tempo reale (Linux, richiede `pw-record`, `parec` o `arecord`). Usa Nemotron streaming se NeMo/PyTorch è installato, altrimenti ripiega su faster-whisper `large-v3-turbo`. Salva `Trascrizioni/LIVE_<data>.txt`.
+- **Parakeet TDT 0.6B v3**: modello selezionabile dal menu (ONNX via `onnx-asr`, ~25 lingue europee con rilevamento automatico, ~2,5 GB scaricati al primo uso). Gira su CPU (con `onnxruntime-gpu` può usare la GPU), non usa il contesto/prompt personalizzato né la scelta lingua, e lavora a blocchi di 25 s. Supporta riconoscimento voci, timestamp ed export `.txt`.
+- **LIVE (Microfono)**: pulsante accanto a *Sfoglia file...* per trascrivere in tempo reale dal microfono (solo Linux: richiede `pw-record`, `parec` o `arecord`). Il testo compare a blocchi di ~3 s; premendo **Stop LIVE** viene salvato `Trascrizioni/LIVE_<data>.txt`. Usa NVIDIA Nemotron 3.5 Streaming se sono installati NeMo/PyTorch (`pip install nemo_toolkit[asr]`), altrimenti ripiega su faster-whisper `large-v3-turbo` (comportamento predefinito). Il LIVE non parte se è in corso una trascrizione di file.
 - **Visualizzazione live & export automatico**:
   - Streaming del testo in tempo reale raggruppato in paragrafi leggibili.
   - Toggle **Mostra timestamp** `(MM:SS)` senza ripetere la trascrizione.
