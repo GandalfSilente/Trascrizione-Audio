@@ -85,6 +85,12 @@ python3 -m venv .venv
 ```
 
 > **Solo CPU (senza GPU NVIDIA)**: puoi installare unicamente `.venv/bin/pip install faster-whisper` senza i pacchetti `nvidia-cublas-cu12` e `nvidia-cudnn-cu12`.
+>
+> **Opzionale — Nemotron 3.5 LIVE nativo (GPU CUDA)**: per usare `nvidia/nemotron-3.5-asr-streaming-0.6b` al posto del fallback Whisper nel tasto **LIVE (Microfono)**:
+> ```bash
+> .venv/bin/pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu128
+> .venv/bin/pip install "nemo_toolkit[asr]" matplotlib
+> ```
 
 ---
 
