@@ -102,6 +102,16 @@ class LiveTranscriber:
             except Exception:
                 pass
 
+    @staticmethod
+    def _read_exact(stream: Any, n: int) -> bytes:
+        buf = b""
+        while len(buf) < n:
+            part = stream.read(n - len(buf))
+            if not part:
+                break
+            buf += part
+        return buf
+
     def _emit(self, **state: Any) -> None:
         try:
             self._on_update(state)
@@ -144,6 +154,7 @@ class LiveTranscriber:
                 )
 
             if self._stop_event.is_set():
+                self._emit(status="idle", message="")
                 return
 
             proc = subprocess.Popen(
@@ -164,8 +175,15 @@ class LiveTranscriber:
             # Read 2.5s chunks (16000 Hz * 2 bytes * 2.5s = 80000 bytes)
             chunk_bytes = 16000 * 2 * 3
             assert proc.stdout is not None
+            head = self._read_exact(proc.stdout, 4)
+            if head == b"RIFF":  # pw-record writes a WAV header on stdout
+                self._read_exact(proc.stdout, 40)
+                head = b""
+            pending = head
             while not self._stop_event.is_set():
-                raw = proc.stdout.read(chunk_bytes)
+                raw = pending + self._read_exact(proc.stdout, chunk_bytes - len(pending))
+                pending = b""
+                raw = raw[: len(raw) // 2 * 2]
                 if not raw:
                     break
                 audio = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
