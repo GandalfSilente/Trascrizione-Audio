@@ -217,6 +217,7 @@ class TranscriptionWindow(Adw.ApplicationWindow):
         self._save_prompt_source_id: int | None = None
 
         self._worker = engine.TranscriptionWorker(self._on_worker_update)
+        self._live_transcriber: Any = None
 
         self._build_ui()
         self._restore_saved_settings()
@@ -417,16 +418,25 @@ class TranscriptionWindow(Adw.ApplicationWindow):
         drop_sub.set_wrap(True)
         drop_sub.set_justify(Gtk.Justification.CENTER)
 
+        btn_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        btn_row.set_halign(Gtk.Align.CENTER)
+        btn_row.set_margin_top(6)
+
         browse_btn = Gtk.Button(label="Sfoglia file...")
         browse_btn.add_css_class("accent-btn")
-        browse_btn.set_halign(Gtk.Align.CENTER)
-        browse_btn.set_margin_top(6)
         browse_btn.connect("clicked", lambda _btn: self._open_file_dialog())
+
+        self._live_btn = Gtk.Button(label="LIVE (Microfono)")
+        self._live_btn.add_css_class("secondary-btn")
+        self._live_btn.connect("clicked", self._on_live_clicked)
+
+        btn_row.append(browse_btn)
+        btn_row.append(self._live_btn)
 
         self._drop_zone.append(drop_icon)
         self._drop_zone.append(drop_title)
         self._drop_zone.append(drop_sub)
-        self._drop_zone.append(browse_btn)
+        self._drop_zone.append(btn_row)
 
         # Clicking anywhere inside the drop zone opens the file picker
         click_gesture = Gtk.GestureClick()
@@ -910,6 +920,10 @@ class TranscriptionWindow(Adw.ApplicationWindow):
             self._stop_pulse()
             self._stop_elapsed_timer()
             self._cancel_btn.set_visible(False)
+            self._live_btn.set_sensitive(True)
+            self._live_btn.set_label("LIVE (Microfono)")
+            self._live_btn.remove_css_class("destructive-action")
+            self._live_btn.add_css_class("secondary-btn")
             if status == "done":
                 self._progress_bar.set_fraction(1.0)
             else:
@@ -1173,12 +1187,36 @@ class TranscriptionWindow(Adw.ApplicationWindow):
             except OSError as err:
                 self._show_toast(f"Errore salvataggio .txt: {err}")
 
+    def _on_live_clicked(self, _button: Gtk.Button) -> None:
+        if self._worker.is_busy():
+            self._show_toast("Attendi la fine della trascrizione in corso o annullala.")
+            return
+        if self._live_transcriber is None:
+            import live
+
+            self._live_transcriber = live.LiveTranscriber(self._on_worker_update)
+
+        if self._live_transcriber.is_running():
+            self._live_btn.set_sensitive(False)
+            self._live_btn.set_label("Salvataggio LIVE...")
+            self._live_transcriber.stop()
+        else:
+            self._live_btn.set_label("Stop LIVE")
+            self._live_btn.remove_css_class("secondary-btn")
+            self._live_btn.add_css_class("destructive-action")
+            self._live_transcriber.start(
+                language=self._selected_language(),
+                initial_prompt=self._current_prompt_text(),
+            )
+
     def _on_open_dir_clicked(self, _button: Gtk.Button) -> None:
         engine.OUTPUT_DIR.mkdir(exist_ok=True)
         self._launch_path(str(engine.OUTPUT_DIR))
 
     def _on_cancel_clicked(self, _button: Gtk.Button) -> None:
         self._cancel_btn.set_sensitive(False)
+        if self._live_transcriber is not None and self._live_transcriber.is_running():
+            self._live_transcriber.stop()
         self._worker.cancel()
 
     def _show_toast(self, message: str) -> None:
@@ -1192,9 +1230,14 @@ class TranscriptionWindow(Adw.ApplicationWindow):
             self._save_prompt_source_id = None
             self._persist_current_config()
 
-        if self._closing_confirmed or not self._worker.is_busy():
+        live_busy = (
+            self._live_transcriber is not None and self._live_transcriber.is_running()
+        )
+        if self._closing_confirmed or (not self._worker.is_busy() and not live_busy):
             self._stop_pulse()
             self._stop_elapsed_timer()
+            if self._live_transcriber is not None:
+                self._live_transcriber.stop()
             self._worker.shutdown(timeout=2.0)
             return False
 

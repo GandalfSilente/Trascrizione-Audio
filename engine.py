@@ -75,6 +75,7 @@ MODEL_OPTIONS: list[tuple[str, str]] = [
     ("large-v3", "large-v3 (Massima precisione - Predefinito)"),
     ("ensemble", "Combinato: large-v3 + turbo (Doppio controllo Ensemble)"),
     ("large-v3-turbo", "large-v3-turbo (Ultra veloce)"),
+    ("parakeet-v3", "Parakeet TDT 0.6B v3 (Multilingua • Alta precisione)"),
 ]
 
 LANGUAGE_OPTIONS: list[tuple[str, str]] = [
@@ -730,7 +731,7 @@ class TranscriptionWorker:
         orig_name = job.file_path.name
         model_mode = (
             job.model_mode
-            if job.model_mode in ("large-v3", "ensemble", "large-v3-turbo")
+            if job.model_mode in ("large-v3", "ensemble", "large-v3-turbo", "parakeet-v3")
             else "large-v3"
         )
         is_ensemble = model_mode == "ensemble"
@@ -755,6 +756,80 @@ class TranscriptionWorker:
                 error="",
                 message=f"Preparazione modello per {orig_name}...",
             )
+
+            diar_mode = (
+                job.diarization_mode
+                if job.diarization_mode in ("off", "on", "auto")
+                else "off"
+            )
+            max_transcribe_pct = 92.0 if diar_mode != "off" else 99.0
+
+            if model_mode == "parakeet-v3":
+                import av
+                import numpy as np
+                import onnx_asr
+
+                self._update_state(
+                    status="loading",
+                    message=f"Caricamento Parakeet TDT 0.6B v3 (ONNX) per {orig_name}...",
+                )
+                parakeet_model = onnx_asr.load_model("nemo-parakeet-tdt-0.6b-v3")
+                self._check_cancelled()
+
+                resampler = av.AudioResampler(format="flt", layout="mono", rate=16000)
+                chunks: list[np.ndarray] = []
+                with av.open(str(job.file_path)) as container:
+                    if not container.streams.audio:
+                        raise ValueError("Nessuna traccia audio trovata nel file.")
+                    for frame in container.decode(container.streams.audio[0]):
+                        self._check_cancelled()
+                        for rf in resampler.resample(frame):
+                            arr = rf.to_ndarray()
+                            if arr.ndim == 2:
+                                arr = arr[0]
+                            chunks.append(arr.astype(np.float32, copy=False))
+                audio_16k = np.concatenate(chunks) if chunks else np.zeros(0, dtype=np.float32)
+                total_dur = len(audio_16k) / 16000.0
+                self._update_state(
+                    status="transcribing",
+                    language="auto (Parakeet v3 • 25 lingue)",
+                    duration=total_dur,
+                    message=f"Trascrizione (Parakeet TDT 0.6B v3 • ONNX): {orig_name}",
+                )
+
+                raw_segments = []
+                txt_paragraphs = []
+                ts_paragraphs = []
+                chunk_samples = 25 * 16000
+                for start_idx in range(0, len(audio_16k), chunk_samples):
+                    self._check_cancelled()
+                    end_idx = min(len(audio_16k), start_idx + chunk_samples)
+                    if end_idx - start_idx < 1600:
+                        continue
+                    t_start = start_idx / 16000.0
+                    t_end = end_idx / 16000.0
+                    text = str(parakeet_model.recognize(audio_16k[start_idx:end_idx], sample_rate=16000)).strip()
+                    if text:
+                        raw_segments.append({"start": t_start, "end": t_end, "text": text})
+                        txt_paragraphs.append(text)
+                        ts_paragraphs.append(f"({format_short(t_start)}) {text}")
+                    pct = min(max_transcribe_pct, (t_end / total_dur) * max_transcribe_pct) if total_dur > 0 else 0.0
+                    self._update_state(
+                        lines=list(txt_paragraphs),
+                        ts_lines=list(ts_paragraphs),
+                        progress=round(pct, 1),
+                        elapsed=round(time.time() - t0, 1),
+                    )
+                return self._finalize_job(
+                    job,
+                    orig_name,
+                    raw_segments,
+                    diar_mode,
+                    t0,
+                    cached_model,
+                    cached_model_name,
+                    cached_device,
+                )
 
             ensure_backend_loaded()
             self._check_cancelled()
@@ -950,62 +1025,16 @@ class TranscriptionWorker:
                 )
 
             self._check_cancelled()
-
-            ordered_speakers: list[str] = []
-            if diar_mode != "off" and raw_segments:
-                self._update_state(
-                    progress=94.0,
-                    message=f"Riconoscimento voci in corso per {orig_name}...",
-                    elapsed=round(time.time() - t0, 1),
-                )
-                import diarizer
-
-                raw_segments, ordered_speakers = diarizer.assign_speakers(
-                    job.file_path, raw_segments, mode=diar_mode
-                )
-                self._check_cancelled()
-
-            speaker_blocks = build_speaker_blocks(raw_segments)
-            speaker_names = {spk: spk for spk in ordered_speakers}
-            txt_paragraphs = format_blocks(
-                speaker_blocks, speaker_names=speaker_names, show_timestamps=False
+            return self._finalize_job(
+                job,
+                orig_name,
+                raw_segments,
+                diar_mode,
+                t0,
+                cached_model,
+                cached_model_name,
+                cached_device,
             )
-            ts_paragraphs = format_blocks(
-                speaker_blocks, speaker_names=speaker_names, show_timestamps=True
-            )
-
-            OUTPUT_DIR.mkdir(exist_ok=True)
-            stem = job.file_path.stem
-            out_txt = OUTPUT_DIR / f"{stem}.txt"
-            save_blocks_to_txt(out_txt, speaker_blocks, speaker_names=speaker_names)
-
-            with self._lock:
-                has_more = len(self._queue) > 0 and not self._cancel_event.is_set()
-
-            if not has_more:
-                unload_whisper(cached_model)
-                cached_model = None
-                cached_model_name = None
-
-            done_msg = (
-                f"Completato {orig_name} — passaggio al file successivo..."
-                if has_more
-                else f"Completato! Salvato in Trascrizioni/{out_txt.name} (GPU liberata)"
-            )
-            self._update_state(
-                status="done",
-                progress=100.0,
-                elapsed=round(time.time() - t0, 1),
-                job_started_at=0.0,
-                message=done_msg,
-                lines=txt_paragraphs,
-                ts_lines=ts_paragraphs,
-                speaker_blocks=speaker_blocks,
-                speakers=ordered_speakers,
-                speaker_names=speaker_names,
-                txt_path=str(out_txt),
-            )
-            return cached_model, cached_model_name, cached_device
 
         except _CancelledError:
             unload_whisper(transient_model)
@@ -1030,3 +1059,70 @@ class TranscriptionWorker:
                 message=f"Errore: {exc}",
             )
             return None, None, cached_device
+
+    def _finalize_job(
+        self,
+        job: TranscriptionJob,
+        orig_name: str,
+        raw_segments: list[dict[str, Any]],
+        diar_mode: str,
+        t0: float,
+        cached_model: Any,
+        cached_model_name: str | None,
+        cached_device: str,
+    ) -> tuple[Any, str | None, str]:
+        ordered_speakers: list[str] = []
+        if diar_mode != "off" and raw_segments:
+            self._update_state(
+                progress=94.0,
+                message=f"Riconoscimento voci in corso per {orig_name}...",
+                elapsed=round(time.time() - t0, 1),
+            )
+            import diarizer
+
+            raw_segments, ordered_speakers = diarizer.assign_speakers(
+                job.file_path, raw_segments, mode=diar_mode
+            )
+            self._check_cancelled()
+
+        speaker_blocks = build_speaker_blocks(raw_segments)
+        speaker_names = {spk: spk for spk in ordered_speakers}
+        txt_paragraphs = format_blocks(
+            speaker_blocks, speaker_names=speaker_names, show_timestamps=False
+        )
+        ts_paragraphs = format_blocks(
+            speaker_blocks, speaker_names=speaker_names, show_timestamps=True
+        )
+
+        OUTPUT_DIR.mkdir(exist_ok=True)
+        stem = job.file_path.stem
+        out_txt = OUTPUT_DIR / f"{stem}.txt"
+        save_blocks_to_txt(out_txt, speaker_blocks, speaker_names=speaker_names)
+
+        with self._lock:
+            has_more = len(self._queue) > 0 and not self._cancel_event.is_set()
+
+        if not has_more:
+            unload_whisper(cached_model)
+            cached_model = None
+            cached_model_name = None
+
+        done_msg = (
+            f"Completato {orig_name} — passaggio al file successivo..."
+            if has_more
+            else f"Completato! Salvato in Trascrizioni/{out_txt.name} (GPU liberata)"
+        )
+        self._update_state(
+            status="done",
+            progress=100.0,
+            elapsed=round(time.time() - t0, 1),
+            job_started_at=0.0,
+            message=done_msg,
+            lines=txt_paragraphs,
+            ts_lines=ts_paragraphs,
+            speaker_blocks=speaker_blocks,
+            speakers=ordered_speakers,
+            speaker_names=speaker_names,
+            txt_path=str(out_txt),
+        )
+        return cached_model, cached_model_name, cached_device
