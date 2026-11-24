@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import gc
+import re
 import shutil
 import subprocess
 import threading
@@ -14,6 +16,8 @@ from typing import Any, Callable
 import numpy as np
 
 import engine
+
+_LANG_TAG_RE = re.compile(r"<[a-z]{2}(?:-[A-Z]{2})?>")
 
 
 def _find_audio_capture_cmd() -> list[str]:
@@ -53,16 +57,80 @@ def _find_audio_capture_cmd() -> list[str]:
     )
 
 
-def _try_load_nemotron() -> Any | None:
+def _try_load_nemotron() -> tuple[Any | None, str]:
     """Try loading NVIDIA Nemotron 3.5 ASR Streaming if NeMo toolkit is installed."""
     try:
+        import torch  # type: ignore
         import nemo.collections.asr as nemo_asr  # type: ignore
+        from huggingface_hub import hf_hub_download
 
-        return nemo_asr.models.ASRModel.from_pretrained(
-            "nvidia/nemotron-3.5-asr-streaming-0.6b"
-        )
+        dev = "cuda" if torch.cuda.is_available() else "cpu"
+        try:
+            nemo_path = hf_hub_download(
+                "nvidia/nemotron-3.5-asr-streaming-0.6b",
+                "nemotron-3.5-asr-streaming-0.6b.nemo",
+                local_files_only=True,
+            )
+            model = nemo_asr.models.ASRModel.restore_from(
+                nemo_path, map_location=dev
+            ).eval()
+        except Exception:
+            model = nemo_asr.models.ASRModel.from_pretrained(
+                "nvidia/nemotron-3.5-asr-streaming-0.6b"
+            ).eval()
+            if dev == "cuda":
+                model = model.cuda()
+        return model, dev
     except Exception:
-        return None
+        return None, ""
+
+
+def _unload_nemotron(model: Any | None) -> None:
+    """Release Nemotron model and free GPU VRAM if PyTorch CUDA is active."""
+    if model is None:
+        return
+    del model
+    gc.collect()
+    try:
+        import torch  # type: ignore
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+
+def _map_nemotron_lang(language: str) -> str:
+    """Map UI language code ('auto', 'it', 'en') to Nemotron prompt key."""
+    if language == "it":
+        return "it-IT"
+    if language == "en":
+        return "en-US"
+    return "auto"
+
+
+def _clean_nemotron_text(text: str) -> str:
+    """Strip inline language tags like <en-US> and collapse whitespace."""
+    cleaned = _LANG_TAG_RE.sub("", text)
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def _text_to_blocks(text: str, total_elapsed: float) -> list[dict[str, Any]]:
+    """Split cumulative streaming text into sentence blocks for UI/export."""
+    if not text:
+        return []
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
+    if not sentences:
+        return [{"speaker": "", "start": 0.0, "text": text}]
+    n = len(sentences)
+    return [
+        {
+            "speaker": "",
+            "start": round((i / n) * total_elapsed, 1) if n > 1 else 0.0,
+            "text": sent,
+        }
+        for i, sent in enumerate(sentences)
+    ]
 
 
 class LiveTranscriber:
@@ -118,6 +186,166 @@ class LiveTranscriber:
         except Exception:
             pass
 
+    def _run_nemotron_stream(
+        self,
+        model: Any,
+        stdout: Any,
+        pending: bytes,
+        t0: float,
+        backend_label: str,
+    ) -> list[dict[str, Any]]:
+        import torch  # type: ignore
+
+        device = next(model.parameters()).device
+        step_frames = model.encoder.streaming_cfg.chunk_size[1]
+        pre_cache = model.encoder.streaming_cfg.pre_encode_cache_size[1]
+        drop_extra = model.encoder.streaming_cfg.drop_extra_pre_encoded
+        # 1.28s chunks (20480 samples * 2 bytes = 40960 bytes)
+        chunk_bytes = 16000 * 2 * 128 // 100
+
+        blocks: list[dict[str, Any]] = []
+        last_text = ""
+
+        with torch.inference_mode():
+            cache_ch, cache_tm, cache_len = model.encoder.get_initial_cache_state(
+                batch_size=1
+            )
+            prev_hyp = None
+            prev_pred = None
+            tail_frames = None
+            step = 0
+
+            while not self._stop_event.is_set():
+                raw = pending + self._read_exact(stdout, chunk_bytes - len(pending))
+                pending = b""
+                raw = raw[: len(raw) // 2 * 2]
+                if not raw:
+                    break
+                audio = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+                if len(audio) < 1600:
+                    continue
+
+                sig = torch.from_numpy(audio).unsqueeze(0).to(device)
+                sig_len = torch.tensor([sig.shape[1]], dtype=torch.long, device=device)
+                mel, mel_len = model.preprocessor(input_signal=sig, length=sig_len)
+                mel = mel[:, :, : mel_len[0]]
+                if tail_frames is not None:
+                    combined = torch.cat([tail_frames, mel], dim=2)
+                    offset = tail_frames.shape[2]
+                else:
+                    combined = mel
+                    offset = 0
+
+                idx = offset
+                total = combined.shape[2]
+                texts = None
+                while idx < total:
+                    end = min(idx + step_frames, total)
+                    start = max(0, idx - (pre_cache if step > 0 else 0))
+                    sub = combined[:, :, start:end]
+                    slen = torch.tensor([sub.shape[2]], dtype=torch.long, device=device)
+                    res = model.conformer_stream_step(
+                        processed_signal=sub,
+                        processed_signal_length=slen,
+                        cache_last_channel=cache_ch,
+                        cache_last_time=cache_tm,
+                        cache_last_channel_len=cache_len,
+                        keep_all_outputs=False,
+                        previous_hypotheses=prev_hyp,
+                        previous_pred_out=prev_pred,
+                        drop_extra_pre_encoded=(drop_extra if step != 0 else 0),
+                        return_transcription=True,
+                    )
+                    prev_pred, texts, cache_ch, cache_tm, cache_len, prev_hyp = res[:6]
+                    idx = end
+                    step += 1
+
+                tail_frames = (
+                    combined[:, :, -pre_cache:]
+                    if combined.shape[2] >= pre_cache
+                    else combined
+                )
+                elapsed_now = time.time() - t0
+                raw_t = texts[0].text if texts and hasattr(texts[0], "text") else ""
+                clean_t = _clean_nemotron_text(raw_t)
+                if clean_t and clean_t != last_text:
+                    last_text = clean_t
+                    blocks = _text_to_blocks(clean_t, elapsed_now)
+                    lines = engine.format_blocks(blocks, show_timestamps=False)
+                    ts_lines = engine.format_blocks(blocks, show_timestamps=True)
+                    self._emit(
+                        status="transcribing",
+                        lines=lines,
+                        ts_lines=ts_lines,
+                        speaker_blocks=blocks,
+                        duration=round(elapsed_now, 1),
+                        elapsed=round(elapsed_now, 1),
+                        message=f"{backend_label} attivo — parla nel microfono...",
+                    )
+                else:
+                    self._emit(elapsed=round(elapsed_now, 1))
+
+        return blocks
+
+    def _run_whisper_stream(
+        self,
+        whisper_model: Any,
+        stdout: Any,
+        pending: bytes,
+        t0: float,
+        language: str,
+        initial_prompt: str,
+        backend_label: str,
+    ) -> list[dict[str, Any]]:
+        chunk_bytes = 16000 * 2 * 3
+        blocks: list[dict[str, Any]] = []
+        while not self._stop_event.is_set():
+            raw = pending + self._read_exact(stdout, chunk_bytes - len(pending))
+            pending = b""
+            raw = raw[: len(raw) // 2 * 2]
+            if not raw:
+                break
+            audio = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+            if len(audio) < 3200:
+                continue
+            if float(np.sqrt(np.mean(audio**2))) < 0.004:
+                self._emit(elapsed=round(time.time() - t0, 1))
+                continue
+
+            elapsed_now = time.time() - t0
+            kw: dict[str, Any] = {
+                "beam_size": 3,
+                "condition_on_previous_text": False,
+                "vad_filter": True,
+                "vad_parameters": dict(engine.VAD_PARAMETERS),
+            }
+            if initial_prompt.strip():
+                kw["hotwords"] = initial_prompt.strip()
+            if language and language != "auto":
+                kw["language"] = language
+            segs, _ = whisper_model.transcribe(audio, **kw)
+            text = " ".join(s.text.strip() for s in segs if s.text.strip()).strip()
+            if text:
+                blocks.append(
+                    {
+                        "speaker": "",
+                        "start": max(0.0, elapsed_now - 3.0),
+                        "text": text,
+                    }
+                )
+                lines = engine.format_blocks(blocks, show_timestamps=False)
+                ts_lines = engine.format_blocks(blocks, show_timestamps=True)
+                self._emit(
+                    status="transcribing",
+                    lines=lines,
+                    ts_lines=ts_lines,
+                    speaker_blocks=blocks,
+                    duration=round(elapsed_now, 1),
+                    elapsed=round(elapsed_now, 1),
+                    message=f"{backend_label} attivo — parla nel microfono...",
+                )
+        return blocks
+
     def _run(self, language: str, initial_prompt: str) -> None:
         t0 = time.time()
         whisper_model: Any = None
@@ -141,12 +369,17 @@ class LiveTranscriber:
                 speaker_names={},
                 txt_path="",
                 error="",
-                message="LIVE: avvio Nemotron 3.5 / CUDA streaming...",
+                message="LIVE: caricamento Nemotron 3.5 / CUDA (~1-2 min)...",
             )
 
-            nemotron_model = _try_load_nemotron()
+            nemotron_model, nem_dev = _try_load_nemotron()
             if nemotron_model is not None:
-                backend_label = "Nemotron 3.5 Streaming"
+                nemotron_model.set_inference_prompt(_map_nemotron_lang(language))
+                backend_label = (
+                    "Nemotron 3.5 Streaming (CUDA)"
+                    if nem_dev == "cuda"
+                    else "Nemotron 3.5 Streaming (CPU)"
+                )
             else:
                 whisper_model, dev = engine.load_whisper("large-v3-turbo")
                 backend_label = (
@@ -172,65 +405,26 @@ class LiveTranscriber:
                 message=f"{backend_label} attivo — parla nel microfono...",
             )
 
-            # Read 2.5s chunks (16000 Hz * 2 bytes * 2.5s = 80000 bytes)
-            chunk_bytes = 16000 * 2 * 3
             assert proc.stdout is not None
             head = self._read_exact(proc.stdout, 4)
             if head == b"RIFF":  # pw-record writes a WAV header on stdout
                 self._read_exact(proc.stdout, 40)
                 head = b""
-            pending = head
-            while not self._stop_event.is_set():
-                raw = pending + self._read_exact(proc.stdout, chunk_bytes - len(pending))
-                pending = b""
-                raw = raw[: len(raw) // 2 * 2]
-                if not raw:
-                    break
-                audio = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
-                if len(audio) < 3200:
-                    continue
-                # Skip near-silent chunks quickly
-                if float(np.sqrt(np.mean(audio**2))) < 0.004:
-                    self._emit(elapsed=round(time.time() - t0, 1))
-                    continue
 
-                elapsed_now = time.time() - t0
-                if nemotron_model is not None:
-                    res = nemotron_model.transcribe([audio])
-                    text = str(res[0].text if hasattr(res[0], "text") else res[0]).strip()
-                else:
-                    kw: dict[str, Any] = {
-                        "beam_size": 3,
-                        "condition_on_previous_text": False,
-                        "vad_filter": True,
-                        "vad_parameters": dict(engine.VAD_PARAMETERS),
-                    }
-                    if initial_prompt.strip():
-                        kw["hotwords"] = initial_prompt.strip()
-                    if language and language != "auto":
-                        kw["language"] = language
-                    segs, _ = whisper_model.transcribe(audio, **kw)
-                    text = " ".join(s.text.strip() for s in segs if s.text.strip()).strip()
-
-                if text:
-                    blocks.append(
-                        {
-                            "speaker": "",
-                            "start": max(0.0, elapsed_now - 3.0),
-                            "text": text,
-                        }
-                    )
-                    lines = engine.format_blocks(blocks, show_timestamps=False)
-                    ts_lines = engine.format_blocks(blocks, show_timestamps=True)
-                    self._emit(
-                        status="transcribing",
-                        lines=lines,
-                        ts_lines=ts_lines,
-                        speaker_blocks=blocks,
-                        duration=round(elapsed_now, 1),
-                        elapsed=round(elapsed_now, 1),
-                        message=f"{backend_label} attivo — parla nel microfono...",
-                    )
+            if nemotron_model is not None:
+                blocks = self._run_nemotron_stream(
+                    nemotron_model, proc.stdout, head, t0, backend_label
+                )
+            else:
+                blocks = self._run_whisper_stream(
+                    whisper_model,
+                    proc.stdout,
+                    head,
+                    t0,
+                    language,
+                    initial_prompt,
+                    backend_label,
+                )
 
             engine.OUTPUT_DIR.mkdir(exist_ok=True)
             stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -271,4 +465,5 @@ class LiveTranscriber:
                     proc.wait(timeout=1.0)
                 except Exception:
                     pass
+            _unload_nemotron(nemotron_model)
             engine.unload_whisper(whisper_model)
