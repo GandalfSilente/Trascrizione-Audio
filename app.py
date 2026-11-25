@@ -186,6 +186,16 @@ button.ready-btn:hover {
     font-weight: 600;
 }
 
+.engine-pill {
+    background-color: #1d3036;
+    color: #9bd5de;
+    border: 1px solid #355a62;
+    border-radius: 999px;
+    padding: 2px 9px;
+    font-size: 11px;
+    font-weight: 700;
+}
+
 .backend-pill {
     color: #8b95a8;
     font-size: 12px;
@@ -458,6 +468,10 @@ class TranscriptionWindow(Adw.ApplicationWindow):
 
         meta_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
 
+        self._engine_badge = Gtk.Label(label="")
+        self._engine_badge.add_css_class("engine-pill")
+        self._engine_badge.set_visible(False)
+
         self._status_label = Gtk.Label(
             label="Pronto. Trascina uno o più file audio o video.", xalign=0.0
         )
@@ -472,6 +486,7 @@ class TranscriptionWindow(Adw.ApplicationWindow):
         self._info_label = Gtk.Label(label="", xalign=1.0)
         self._info_label.add_css_class("muted-label")
 
+        meta_row.append(self._engine_badge)
         meta_row.append(self._status_label)
         meta_row.append(self._queue_badge)
         meta_row.append(self._info_label)
@@ -893,6 +908,11 @@ class TranscriptionWindow(Adw.ApplicationWindow):
         self._last_state = snap
         status = snap.get("status", "idle")
         progress = float(snap.get("progress", 0.0))
+        engine_name = str(snap.get("engine", ""))
+        self._engine_badge.set_text(engine_name)
+        self._engine_badge.set_visible(
+            bool(engine_name) and status in ("loading", "transcribing", "error")
+        )
         queue_size = int(snap.get("queue_size", 0))
 
         self._status_label.set_text(snap.get("message", ""))
@@ -991,6 +1011,18 @@ class TranscriptionWindow(Adw.ApplicationWindow):
             elapsed = float(snap.get("elapsed", 0.0))
         if elapsed > 0:
             parts.append(f"Tempo: {elapsed:.1f}s")
+
+        progress_started_at = float(snap.get("progress_started_at") or 0.0)
+        if status in ("loading", "transcribing"):
+            if status == "loading":
+                parts.append("Stima: non disponibile in questa fase")
+            elif progress < 5:
+                parts.append("Stima: in calcolo")
+            elif progress < 100:
+                estimate_started_at = progress_started_at or started_at
+                estimate_elapsed = max(0.0, time.time() - estimate_started_at)
+                remaining = round(estimate_elapsed * (100.0 - progress) / progress)
+                parts.append(f"Stima: ~{engine.format_short(remaining)}")
 
         self._info_label.set_text(" • ".join(parts))
 

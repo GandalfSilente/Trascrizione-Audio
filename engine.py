@@ -593,10 +593,12 @@ class TranscriptionWorker:
             "progress": 0.0,
             "message": "Pronto. Trascina uno o più file audio o video.",
             "filename": "",
+            "engine": "",
             "language": "",
             "duration": 0.0,
             "elapsed": 0.0,
             "job_started_at": 0.0,
+            "progress_started_at": 0.0,
             "lines": [],
             "ts_lines": [],
             "speaker_blocks": [],
@@ -734,8 +736,10 @@ class TranscriptionWorker:
             if job.model_mode in ("large-v3", "ensemble", "large-v3-turbo", "parakeet-v3")
             else "large-v3"
         )
+        engine_name = "Parakeet" if model_mode == "parakeet-v3" else "Whisper"
         is_ensemble = model_mode == "ensemble"
         transient_model: Any = None
+        progress_started_at = 0.0
 
         try:
             self._check_cancelled()
@@ -743,10 +747,12 @@ class TranscriptionWorker:
                 status="loading",
                 progress=0.0,
                 filename=orig_name,
+                engine=engine_name,
                 language="",
                 duration=0.0,
                 elapsed=0.0,
                 job_started_at=t0,
+                progress_started_at=0.0,
                 lines=[],
                 ts_lines=[],
                 speaker_blocks=[],
@@ -754,7 +760,7 @@ class TranscriptionWorker:
                 speaker_names={},
                 txt_path="",
                 error="",
-                message=f"Preparazione modello per {orig_name}...",
+                message=f"{engine_name}: preparazione modello per {orig_name}...",
             )
 
             diar_mode = (
@@ -775,6 +781,10 @@ class TranscriptionWorker:
                 )
                 parakeet_model = onnx_asr.load_model("nemo-parakeet-tdt-0.6b-v3")
                 self._check_cancelled()
+                self._update_state(
+                    status="loading",
+                    message=f"Parakeet: lettura e preparazione audio {orig_name}...",
+                )
 
                 resampler = av.AudioResampler(format="flt", layout="mono", rate=16000)
                 chunks: list[np.ndarray] = []
@@ -790,8 +800,10 @@ class TranscriptionWorker:
                             chunks.append(arr.astype(np.float32, copy=False))
                 audio_16k = np.concatenate(chunks) if chunks else np.zeros(0, dtype=np.float32)
                 total_dur = len(audio_16k) / 16000.0
+                progress_started_at = time.time()
                 self._update_state(
                     status="transcribing",
+                    progress_started_at=progress_started_at,
                     language="auto (Parakeet v3 • 25 lingue)",
                     duration=total_dur,
                     message=f"Trascrizione (Parakeet TDT 0.6B v3 • ONNX): {orig_name}",
@@ -866,9 +878,11 @@ class TranscriptionWorker:
                 self._check_cancelled()
 
                 dev_label = "GPU CUDA" if dev1 == "cuda" else "CPU"
+                progress_started_at = time.time()
                 self._update_state(
                     status="transcribing",
-                    message=f"Passaggio 1/2 (large-v3-turbo • {dev_label}): {orig_name}",
+                    progress_started_at=progress_started_at,
+                    message=f"Whisper • passaggio 1/2 (large-v3-turbo • {dev_label}): {orig_name}",
                 )
 
                 segs_1, info_1 = transient_model.transcribe(str(job.file_path), **kwargs)
@@ -929,13 +943,16 @@ class TranscriptionWorker:
                 cached_device = device_used
 
             self._check_cancelled()
+            if progress_started_at <= 0:
+                progress_started_at = time.time()
             dev_label = "GPU CUDA" if device_used == "cuda" else "CPU"
             self._update_state(
                 status="transcribing",
+                progress_started_at=progress_started_at,
                 message=(
-                    f"Passaggio 2/2 ({target_model} + Ensemble • {dev_label}): {orig_name}"
+                    f"Whisper • passaggio 2/2 ({target_model} + Ensemble • {dev_label}): {orig_name}"
                     if is_ensemble
-                    else f"Trascrizione ({target_model} • {dev_label}): {orig_name}"
+                    else f"Whisper • trascrizione ({target_model} • {dev_label}): {orig_name}"
                 ),
             )
 
@@ -1075,6 +1092,7 @@ class TranscriptionWorker:
         if diar_mode != "off" and raw_segments:
             self._update_state(
                 progress=94.0,
+                engine="Riconoscimento voci",
                 message=f"Riconoscimento voci in corso per {orig_name}...",
                 elapsed=round(time.time() - t0, 1),
             )
