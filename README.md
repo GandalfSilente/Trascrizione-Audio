@@ -1,5 +1,7 @@
 # Trascrizione Audio Locale (GTK 4 + Libadwaita + faster-whisper)
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](#licenza-e-disclaimer) [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-green.svg)](#licenza-e-disclaimer)
+
 Applicazione desktop nativa per Linux (con script CLI incluso) per trascrivere file audio e video lunghi **100% in locale e offline**, sfruttando `faster-whisper` con accelerazione **GPU NVIDIA CUDA** (e fallback automatico su CPU) e filtro vocale **VAD**.
 
 Progettata per avviarsi istantaneamente senza browser né server web locali, con supporto a Drag & Drop nativo Wayland, coda multi-file e profili di contesto personalizzabili per adattare il riconoscimento a qualsiasi disciplina (medicina, fisica, informatica, ecc.).
@@ -272,3 +274,11 @@ osacompile -o ~/Desktop/"Trascrizione Audio.app" \
 - I file sorgente vengono letti direttamente dal disco senza creare copie temporanee e **non vengono mai modificati né eliminati**.
 - I profili personalizzati e le preferenze dell'interfaccia sono salvati localmente in `~/.config/trascrizione-audio/config.json`, separati dal repository.
 - La cartella `Trascrizioni/` è esclusa dal tracciamento Git tramite `.gitignore`.
+
+---
+
+## Licenza e Disclaimer
+
+- **Doppia licenza**: il codice sorgente di questo progetto è rilasciato sotto licenza **MIT** e **Apache License 2.0**, a scelta dell'utente.
+- **Componenti di terze parti**: i modelli e le librerie esterni eventualmente scaricati o utilizzati (tra cui Whisper / `faster-whisper`, Parakeet, WeSpeaker e Nemotron) restano soggetti alle rispettive licenze originali.
+- **Esclusione di responsabilità**: il software è fornito *"così com'è"* (*"AS IS"*), senza alcuna garanzia esplicita o implicita. Gli autori non assumono alcuna responsabilità per eventuali danni o usi impropri: l'utente finale è l'unico responsabile dell'utilizzo dello strumento e del pieno rispetto delle normative vigenti (incluse quelle su privacy, consenso alle registrazioni audio/video e diritto d'autore).
